@@ -260,6 +260,30 @@ public class PutawayRepository extends BaseJdbcRepository {
   public PutawayTask place(UUID tenantId, UUID taskId, UUID zoneId, UUID by) {
     return inTx(
         c -> {
+          // The batch is locked before the task, as a split or a merge locks them (and the task
+          // after the batch): the task is read unlocked to learn which batch, then locked again
+          // below and judged under its lock.
+          UUID batchId;
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "SELECT batch_id FROM putaway_tasks WHERE tenant_id = ? AND id = ?")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+              if (!rs.next()) {
+                throw ApiException.notFound(
+                    "INVENTORY_PUTAWAY_TASK_NOT_FOUND", "no putaway task " + taskId);
+              }
+              batchId = rs.getObject(1, UUID.class);
+            }
+          }
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "SELECT 1 FROM inventory_batches WHERE tenant_id = ? AND id = ? FOR UPDATE")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, batchId);
+            ps.executeQuery().close();
+          }
           PutawayTask t;
           try (PreparedStatement ps =
               c.prepareStatement(

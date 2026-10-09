@@ -1799,6 +1799,27 @@ public class InventoryRepository extends BaseOutboxRepository {
         MovementAttribution.by(actorId, MovementAttribution.CYCLE_COUNT_VARIANCE);
     return inTx(
         c -> {
+          // The header is locked, and its status read under the lock, before anything is applied:
+          // two requests that both passed the service's look at the status then run one after the
+          // other, and the second finds the count done instead of adjusting the stock again.
+          String status;
+          try (PreparedStatement ps =
+              c.prepareStatement(
+                  "SELECT status FROM cycle_count_headers WHERE tenant_id = ? AND id = ?"
+                      + " FOR UPDATE")) {
+            ps.setObject(1, tenantId);
+            ps.setObject(2, headerId);
+            try (ResultSet rs = ps.executeQuery()) {
+              if (!rs.next()) {
+                throw ApiException.notFound("CYCLE_COUNT_NOT_FOUND", "No such cycle count");
+              }
+              status = rs.getString(1);
+            }
+          }
+          if ("ADJUSTED".equals(status) || "CLOSED".equals(status)) {
+            throw new ApiException(
+                422, "CYCLE_COUNT_CLOSED", "Cycle count is already closed", List.of(), null);
+          }
           List<CycleCountLine> approved =
               queryTx(
                   c,
@@ -1912,7 +1933,7 @@ public class InventoryRepository extends BaseOutboxRepository {
                 + " WHERE tenant_id=? AND store_id=? AND variant_id=?"
                 + " AND material_status='AVAILABLE' AND duty_status='DUTY_PAID' AND "
                 + expiryDay.of(tenantId).sellableSql("")
-                + " FOR UPDATE")) {
+                + " ORDER BY id FOR UPDATE")) {
       ps.setObject(1, tenantId);
       ps.setObject(2, storeId);
       ps.setObject(3, variantId);
@@ -2049,10 +2070,32 @@ public class InventoryRepository extends BaseOutboxRepository {
       UUID onlyZone,
       MovementAttribution attribution)
       throws SQLException {
+    // Before any batch is locked: a recall that is opening holds the gate until it commits.
+    RecallRepository.gateTx(c, tenantId);
     String orderBy = pickOrderClause(strategy, gradePreference, zonePriorityOrder);
     BigDecimal toDeduct = qty;
     List<Drawn> batches = new ArrayList<>();
     List<Drawn> drawn = new ArrayList<>();
+    // Every batch that may be drawn is locked first, in id order, which is the order a recall
+    // opening and the other lockers take them in. The statement below then reads them in the
+    // rule's order, which is not the id order, and finds them already locked. Locking in the rule's
+    // order alone would hold the batch drawn first while waiting for one a recall holds, and the
+    // recall would be waiting for that one: a deadlock.
+    try (PreparedStatement ps =
+        c.prepareStatement(
+            "SELECT id FROM inventory_batches"
+                + " WHERE tenant_id=? AND store_id=? AND variant_id=? AND remaining_qty > 0"
+                + " AND material_status='AVAILABLE'"
+                + dutyFilter(moveType)
+                + expiryFilter(tenantId, moveType)
+                + (onlyZone == null ? "" : " AND zone_id = ?")
+                + " ORDER BY id FOR UPDATE")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, storeId);
+      ps.setObject(3, variantId);
+      if (onlyZone != null) ps.setObject(4, onlyZone);
+      ps.executeQuery().close();
+    }
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT id, remaining_qty, batch_no, expiry_date, cost_price, grade, ownership,"

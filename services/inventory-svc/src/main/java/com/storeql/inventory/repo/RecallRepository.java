@@ -139,6 +139,7 @@ public class RecallRepository extends BaseOutboxRepository {
       Function<AffectedOrder, OutboxRow> saleAffectedEvent) {
     inTx(
         c -> {
+          gate(c, header.tenantId(), "pg_advisory_xact_lock");
           try {
             insertHeader(c, header);
           } catch (SQLException e) {
@@ -315,6 +316,10 @@ public class RecallRepository extends BaseOutboxRepository {
    * @param parents the batches the new one is made from; none for stock that is not
    */
   static String holdOnArrival(Connection c, Batch batch, List<UUID> parents) throws SQLException {
+    // The recalls that may hold this batch are locked, shared and in id order, before they are
+    // judged: a cancel or close that is ending one makes this wait and then finds it ended, so a
+    // batch is never held by a recall that is no longer open.
+    lockRecallsOfTx(c, batch.tenantId(), List.of(batch.id()));
     Map<UUID, List<Scope>> scopeByRecall = new LinkedHashMap<>();
     Map<UUID, String> referenceByRecall = new LinkedHashMap<>();
     try (PreparedStatement ps =
@@ -493,6 +498,7 @@ public class RecallRepository extends BaseOutboxRepository {
    */
   static void lockRecallsOfTx(Connection c, UUID tenantId, List<UUID> batchIds)
       throws SQLException {
+    gateTx(c, tenantId);
     try (PreparedStatement ps =
         c.prepareStatement(
             "SELECT r.id FROM recalls r WHERE r.tenant_id = ? AND r.status = 'OPEN' AND ("
@@ -506,6 +512,29 @@ public class RecallRepository extends BaseOutboxRepository {
       ps.setObject(1, tenantId);
       ps.setArray(2, c.createArrayOf("uuid", ids));
       ps.setArray(3, c.createArrayOf("uuid", ids));
+      ps.executeQuery().close();
+    }
+  }
+
+  /**
+   * The gate between a recall opening and stock arriving or being drawn, shared by the second and
+   * exclusive for the first, held to the end of the transaction. A recall that is opening cannot
+   * see a batch another transaction has made but not committed, and that transaction cannot see the
+   * recall: without the gate each misses the other and a recalled lot goes on sale. With it they
+   * run one after the other, and whichever comes second sees the first.
+   *
+   * <p>It is the first lock a transaction takes, before any batch, so it cannot be waiting on the
+   * gate while it holds a batch the recall needs. One gate for the business, not one per variant,
+   * so two transactions that touch several variants never take gates in different orders.
+   */
+  static void gateTx(Connection c, UUID tenantId) throws SQLException {
+    gate(c, tenantId, "pg_advisory_xact_lock_shared");
+  }
+
+  private static void gate(Connection c, UUID tenantId, String function) throws SQLException {
+    try (PreparedStatement ps =
+        c.prepareStatement("SELECT " + function + "(hashtextextended(?, 0))")) {
+      ps.setString(1, "inventory:recall-gate:" + tenantId);
       ps.executeQuery().close();
     }
   }
@@ -1136,6 +1165,17 @@ public class RecallRepository extends BaseOutboxRepository {
 
   private static void restoreIfNoLongerHeld(
       Connection c, UUID tenantId, UUID batchId, String priorStatus) throws SQLException {
+    // The batch is locked in a statement of its own first. A recall that is opening may hold it
+    // right now; the update below must then start after that recall has committed, or its test for
+    // "no open recall holds this batch" is made on a snapshot that cannot see the new hold and the
+    // batch goes back on sale under an open recall.
+    try (PreparedStatement lock =
+        c.prepareStatement(
+            "SELECT 1 FROM inventory_batches WHERE tenant_id = ? AND id = ? FOR UPDATE")) {
+      lock.setObject(1, tenantId);
+      lock.setObject(2, batchId);
+      lock.executeQuery().close();
+    }
     try (PreparedStatement ps =
         c.prepareStatement(
             "UPDATE inventory_batches SET material_status = ?, material_status_reason = NULL,"
