@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
@@ -14,6 +15,7 @@ import 'package:storeql_app/core/offline/offline_queue.dart';
 import 'package:storeql_app/core/offline/offline_sale.dart';
 import 'package:storeql_app/core/storage/app_storage.dart';
 import 'package:storeql_app/features/admin/providers/admin_providers.dart';
+import 'package:storeql_app/features/pos/cash_providers.dart';
 import 'package:storeql_app/features/pos/held_card_payment.dart';
 import 'package:storeql_app/features/pos/pos_providers.dart';
 import 'package:storeql_app/features/pos/pos_receipt_data.dart';
@@ -121,6 +123,16 @@ class _NoopPosSessionNotifier extends PosSessionNotifier {
 
   @override
   Future<void> restore() async {}
+}
+
+/// The till drawer a sale is rung on, as the Cash screen leaves it.
+class _Drawer extends SaleTillNotifier {
+  _Drawer(this.id);
+
+  final String? id;
+
+  @override
+  Future<String?> build() async => id;
 }
 
 const _jam = PosLine(
@@ -650,6 +662,7 @@ Future<ProviderContainer> _pump(
   TerminalWait wait = _brief,
   ValueNotifier<bool>? shown,
   Key? key,
+  List<Override> overrides = const [],
 }) async {
   tester.view.physicalSize = const Size(800, 1200);
   tester.view.devicePixelRatio = 1;
@@ -687,6 +700,7 @@ Future<ProviderContainer> _pump(
             .overrideWithValue((s) => _Printer(s, printed)),
       terminalWaitProvider.overrideWithValue(wait),
       terminalClockProvider.overrideWithValue(() => tester.binding.clock.now()),
+      ...overrides,
     ],
     child: MaterialApp(
       home: Scaffold(
@@ -3244,5 +3258,100 @@ void main() {
     expect(find.textContaining('goes back on the card'), findsOneWidget);
     expect(container.read(heldCardPaymentProvider), isNull,
         reason: 'payment-svc owes the card back; nothing is left to finish');
+  });
+  // The drawer a sale is rung on is where the cash is counted; it is not what
+  // the sale IS. A held card payment is carried on only while the sale is what
+  // it was, and the drawer changing between two presses - a till opened or
+  // closed on the Cash tab while the cardholder is still at the machine - used
+  // to read as a different sale: the card taken for the first press could then
+  // only be put back, for ever, because every press named the new drawer.
+  group('a drawer that changes between two presses', () {
+    testWidgets(
+        'does not make a held card sale a different one: the next press '
+        'carries it on under the same keys, naming the drawer open now',
+        (tester) async {
+      final server = _Server(presses: {
+        0: ['TIMEOUT', 'REQUESTED']
+      });
+      final container = await _pump(tester, server,
+          device: _MemStorage(),
+          overrides: [saleTillProvider.overrideWith(() => _Drawer('drawer-1'))]);
+      await _addCard(tester);
+      await _stopAtTheMachine(tester);
+      final held = container.read(heldCardPaymentProvider)!;
+
+      // The cashier opens another drawer; the cardholder finishes at the machine.
+      container.read(saleTillProvider.notifier).opened('drawer-2');
+      server.settle('att-1', 'APPROVED');
+      await _finish(tester);
+
+      expect(find.byKey(const Key('tender-held-taken')), findsNothing,
+          reason: 'it is the same sale, not "a changed sale"');
+      expect(find.byKey(const Key('tender-held-recorded')), findsNothing);
+      expect(server.orderCancels, isEmpty);
+      expect(find.text('Sale complete'), findsOneWidget);
+      expect(server.termKeys, hasLength(1),
+          reason: 'one card payment: a second key would be a second amount');
+      expect(server.orderKeys, hasLength(1));
+      expect(container.read(heldCardPaymentProvider), isNull);
+      expect(held.base, isNotEmpty);
+      expect(server.recorded.values.single['tillSessionId'], 'drawer-2',
+          reason: 'the money is counted in the drawer open when it is recorded');
+    });
+
+    testWidgets(
+        'nor does a drawer that was not open at the first press and is by '
+        'the second', (tester) async {
+      final server = _Server(presses: {
+        0: ['TIMEOUT', 'REQUESTED']
+      });
+      final container = await _pump(tester, server,
+          device: _MemStorage(),
+          overrides: [saleTillProvider.overrideWith(() => _Drawer(null))]);
+      await _addCard(tester);
+      await _stopAtTheMachine(tester);
+
+      container.read(saleTillProvider.notifier).opened('drawer-1');
+      server.settle('att-1', 'APPROVED');
+      await _finish(tester);
+
+      expect(find.byKey(const Key('tender-held-taken')), findsNothing);
+      expect(find.text('Sale complete'), findsOneWidget);
+      expect(server.termKeys, hasLength(1));
+      expect(server.orderKeys, hasLength(1));
+    });
+  });
+
+  group('what makes a tender "the same one"', () {
+    // payment-svc replays a tender by its key whatever else the body says, and
+    // takes a tender again naming no drawer when it will not count one: the
+    // drawer is where cash is counted, not what the tender is.
+    const body = {
+      'amount': 12.0,
+      'method': 'CARD',
+      'storeId': 'store-1',
+      'reference': 'AUTH-77',
+    };
+
+    test('the drawer is not part of it', () {
+      expect(tenderFingerprint({...body, 'tillSessionId': 'drawer-1'}, 'term-1'),
+          tenderFingerprint({...body, 'tillSessionId': 'drawer-2'}, 'term-1'));
+      expect(tenderFingerprint({...body, 'tillSessionId': 'drawer-1'}, 'term-1'),
+          tenderFingerprint(body, 'term-1'),
+          reason: 'a drawer opened between two presses is the same tender');
+    });
+
+    test('everything else that makes a tender what it is, is', () {
+      final base = tenderFingerprint({...body, 'tillSessionId': 'drawer-1'}, 'term-1');
+      expect(tenderFingerprint({...body, 'amount': 12.5}, 'term-1'), isNot(base));
+      expect(tenderFingerprint({...body, 'method': 'CASH'}, 'term-1'), isNot(base));
+      expect(tenderFingerprint({...body, 'reference': 'AUTH-78'}, 'term-1'),
+          isNot(base));
+      expect(tenderFingerprint({...body, 'storeId': 'store-2'}, 'term-1'),
+          isNot(base));
+      expect(tenderFingerprint(body, 'term-2'), isNot(base),
+          reason: 'another card machine is another payment');
+      expect(tenderFingerprint(body, null), isNot(base));
+    });
   });
 }

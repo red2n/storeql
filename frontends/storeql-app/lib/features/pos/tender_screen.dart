@@ -67,6 +67,25 @@ String? saleFingerprint(Object? request) {
   }
 }
 
+/// A fingerprint of one tender a sale sends: [body] as it goes to payment-svc,
+/// less the drawer, and the card machine it is for.
+///
+/// The drawer (`tillSessionId`) says where the cash is *counted*, not what the
+/// tender *is*. payment-svc replays a tender by its key whatever else the body
+/// says, and answers a drawer it will not count by taking the tender again
+/// naming none ([postTender]), so a drawer opened or closed between two presses
+/// of a held card sale is the same payment. With it in the print, the second
+/// press read as a different sale: the card taken for the first could then only
+/// be put back, because every press named the new drawer. Everything else that
+/// makes a tender what it is - amount, method, reference, store, customer,
+/// currency, the machine - stays in it.
+@visibleForTesting
+String? tenderFingerprint(Map<String, dynamic> body, String? terminalId) =>
+    saleFingerprint([_withoutDrawer(body), terminalId]);
+
+Map<String, dynamic> _withoutDrawer(Map<String, dynamic> body) =>
+    {...body}..remove('tillSessionId');
+
 /// Whether [e] is payment-svc refusing a card machine that is gone from the
 /// sale's store — retired, or moved to another — which it does before it
 /// looks the key up, on every ask: asking again never gets another answer.
@@ -1763,7 +1782,8 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final signature = saleFingerprint([
       settlement?.orderId,
       orderRequest,
-      [for (final t in owed) t.body],
+      // The drawer is where the cash is counted, not part of the sale itself.
+      [for (final t in owed) _withoutDrawer(t.body)],
       [for (final t in tenders) t.terminalId],
     ]);
     // The order alone, and each tender alone: a press may change a tender the
@@ -1771,7 +1791,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final orderSignature = saleFingerprint([settlement?.orderId, orderRequest]);
     final tenderPrints = [
       for (var i = 0; i < tenders.length; i++)
-        saleFingerprint([owed[i].body, tenders[i].terminalId]),
+        tenderFingerprint(owed[i].body, tenders[i].terminalId),
     ];
     return (
       orderRequest: orderRequest,
