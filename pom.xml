@@ -40,6 +40,11 @@
              producing a mixed-version Testcontainers classpath (unsupported; caused flaky
              GenericContainer port-wait timeouts against containers that were demonstrably up). -->
         <testcontainers.version>1.21.4</testcontainers.version>
+        <!-- JUnit 6 (Jupiter + Platform move together; one BOM). The import below wins over the
+             5.12.2 that Helidon's own `version.lib.junit` names — `mvn dependency:tree` shows
+             6.1.3 for every org.junit artifact in every module, none left on 5.x. Surefire (3.1.0,
+             from Helidon's parent) takes junit-platform-launcher at the engine's version, so no
+             launcher is declared here. -->
         <junit.version>6.1.3</junit.version>
         <lettuce.version>6.5.1.RELEASE</lettuce.version>
         <pdfbox.version>3.0.8</pdfbox.version>

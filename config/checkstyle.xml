@@ -69,7 +69,7 @@
         <module name="RedundantImport"/>
         <module name="UnusedImports"/>
         <module name="IllegalImport">
-            <!-- sun.* is not an API; org.junit.Assert is JUnit 4, and the platform is JUnit 5. -->
+            <!-- sun.* is not an API; org.junit.Assert is JUnit 4, and the platform is JUnit 6 (Jupiter). -->
             <property name="illegalPkgs" value="sun, org.junit.Assert"/>
         </module>
 

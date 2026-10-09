@@ -98,7 +98,7 @@ These aren't aspirational guidelines — they're enforced on every service and c
 | Config | Centralized config service (no secrets or env-specific values in code/images) |
 | Observability | Prometheus + Grafana (metrics), Zipkin/Tempo (tracing), Loki (logs) |
 | Frontend | Flutter (web + Android/iOS targets), Riverpod 2.x, go_router, dio — one codebase, 4 shells |
-| Testing | JUnit 5, Testcontainers, ArchUnit, SpotBugs, PMD |
+| Testing | JUnit 6 (Jupiter), Testcontainers, ArchUnit, SpotBugs, PMD |
 
 ## 5. Security posture (summary)
 
