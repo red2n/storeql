@@ -489,6 +489,14 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final terminalId = method == 'CARD' ? await _chooseTerminal() : null;
     if (method == 'CARD' && terminalId == _noTerminalChosen) return;
     if (!mounted) return;
+    // A card taken on a machine StoreQL does not drive is typed in, and the
+    // machine's own receipt reference goes with it: it is how that sale is found
+    // in the acquirer's file, and the server refuses a card tender without one.
+    String? reference;
+    if (method == 'CARD' && terminalId == null) {
+      reference = await _askMachineReference();
+      if (reference == null || !mounted) return;
+    }
     setState(
       () => _tenders.add(
         PosTender(
@@ -496,10 +504,19 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
           amount: applied,
           cashGiven: method == 'CASH' ? result.given : 0,
           terminalId: terminalId,
+          reference: reference,
         ),
       ),
     );
   }
+
+  /// Asks for the card machine's receipt or authorisation reference; null when
+  /// the cashier backs out. At most [cardReferenceMaxLength] characters, as the
+  /// server holds it.
+  Future<String?> _askMachineReference() => showDialog<String>(
+        context: context,
+        builder: (_) => const _MachineReferenceDialog(),
+      );
 
   /// Sentinel for "the cashier backed out of choosing a terminal", which is not
   /// the same as "this store has no terminal" — one adds no tender, the other
@@ -1718,6 +1735,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
             'method': t.paymentMethod,
             'storeId': storeId,
             if (t.method == 'GIFT_CARD') 'reference': t.giftCardCode,
+            if (t.method == 'CARD' && t.reference != null) 'reference': t.reference,
             if (t.method == 'STORE_CREDIT') 'reference': 'STORE_CREDIT',
             if (t.method == 'STORE_CREDIT') 'customerId': t.customerId,
             if (t.method == 'STORE_CREDIT') 'currency': currency,
@@ -4278,6 +4296,76 @@ class _TenderButton extends StatelessWidget {
 
 /// Prompts for an amount; for cash the default is the remaining balance but the
 /// cashier may hand over more (to compute change).
+/// The longest card machine reference the server takes.
+const int cardReferenceMaxLength = 64;
+
+/// The card machine's own receipt or authorisation reference, typed from the
+/// slip. Required: without it a card sale taken on a machine StoreQL does not
+/// see could not be found in the acquirer's file.
+class _MachineReferenceDialog extends StatefulWidget {
+  const _MachineReferenceDialog();
+
+  @override
+  State<_MachineReferenceDialog> createState() =>
+      _MachineReferenceDialogState();
+}
+
+class _MachineReferenceDialogState extends State<_MachineReferenceDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final text = _controller.text.trim();
+    if (text.isEmpty) return;
+    Navigator.of(context).pop(text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      key: const Key('tender-machine-reference'),
+      title: const Text('Card machine reference'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            "Type the reference from the card machine's receipt "
+            '(authorisation code or transaction number).',
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const Key('tender-machine-reference-field'),
+            controller: _controller,
+            autofocus: true,
+            maxLength: cardReferenceMaxLength,
+            textInputAction: TextInputAction.done,
+            decoration: const InputDecoration(labelText: 'Reference'),
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) => _submit(),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('tender-machine-reference-ok'),
+          onPressed: _controller.text.trim().isEmpty ? null : _submit,
+          child: const Text('Add card payment'),
+        ),
+      ],
+    );
+  }
+}
+
 class _AmountDialog extends StatefulWidget {
   final String title;
   final String currency;

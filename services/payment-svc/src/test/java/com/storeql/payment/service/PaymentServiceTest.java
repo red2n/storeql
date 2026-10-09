@@ -113,7 +113,30 @@ class PaymentServiceTest {
       public PaymentTender createTender(PaymentTender t, OutboxRow event) {
         return t;
       }
+
+      @Override
+      public PaymentTender createTender(PaymentTender t, OutboxRow event, String entryMode) {
+        return t;
+      }
     };
+  }
+
+  /** A till's card rule where the store has no card machine and allows no standalone one. */
+  private static void noCardMachine(PaymentService svc) {
+    svc.terminalRepo =
+        new com.storeql.payment.repo.TerminalRepository() {
+          @Override
+          public boolean hasActiveAt(UUID tenantId, UUID storeId) {
+            return false;
+          }
+        };
+    svc.cardSettings =
+        new com.storeql.payment.repo.CardSettingsRepository() {
+          @Override
+          public boolean standaloneAllowed(UUID tenantId, UUID storeId) {
+            return false;
+          }
+        };
   }
 
   /** Store settings unknown (empty) → per-store method enforcement is skipped (fail-open). */
@@ -275,10 +298,25 @@ class PaymentServiceTest {
     PaymentService svc = new PaymentService();
     UUID orderId = Ids.newId();
     svc.repo = capturingRepo();
-    // orderClient deliberately left null — recordTender (the staff/POS path) must never touch it.
+    // orderClient deliberately left null — recordTender (the staff/POS path) must never touch it
+    // when the tender names its store (a typed card that names none asks the order which it is).
+    noCardMachine(svc);
+    svc.storeClient = permissiveStoreClient();
+    var card =
+        new RecordTenderRequest(
+            orderId.toString(),
+            new BigDecimal("99.99"),
+            "CARD",
+            "AUTH 1",
+            null,
+            null,
+            Ids.newId().toString(),
+            null,
+            null,
+            null,
+            null);
 
-    var tender =
-        svc.recordTender(req(orderId, new BigDecimal("99.99")), ctx(Ids.newId(), null), null);
+    var tender = svc.recordTender(card, ctx(Ids.newId(), null), null);
     assertEquals(orderId, tender.orderId());
   }
 
@@ -298,7 +336,7 @@ class PaymentServiceTest {
         orderId.toString(),
         new BigDecimal("10.00"),
         method,
-        null,
+        "AUTH 1",
         null,
         null,
         storeId.toString(),
@@ -319,7 +357,14 @@ class PaymentServiceTest {
             recorded[0]++;
             return t;
           }
+
+          @Override
+          public PaymentTender createTender(PaymentTender t, OutboxRow event, String entryMode) {
+            recorded[0]++;
+            return t;
+          }
         };
+    noCardMachine(svc);
     svc.storeClient = storeEnabling("CASH", "CARD");
     UUID store = Ids.newId();
 

@@ -195,6 +195,12 @@ const Map<String, String> _fallbackWords = {
   'GIFT_CARD_NOT_FOUND': 'No gift card with that code.',
   'GIFT_CARD_NOT_ACTIVE': 'That gift card is not active, so it cannot be topped up.',
   'GIFT_CARD_CURRENCY_MISMATCH': "That gift card is in another currency than this sale.",
+  'PAYMENT_CARD_NEEDS_TERMINAL':
+      'This store takes cards on its card machine. Take the card there and record its approval.',
+  'PAYMENT_CARD_REFERENCE_REQUIRED':
+      "A card taken on a machine we do not drive needs that machine's receipt reference.",
+  'PAYMENT_CARD_REFERENCE_INVALID':
+      "The machine's receipt reference is at most 64 characters.",
 };
 
 const String _genericServerLine = 'An unexpected error occurred.';

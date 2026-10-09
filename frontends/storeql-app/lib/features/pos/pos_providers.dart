@@ -687,6 +687,12 @@ class PosTender {
   /// needs, kept so a reprint shows the same card and entry mode.
   final String? terminalReceiptLine;
 
+  /// For CARD at a store whose card machine StoreQL does not drive: the
+  /// machine's own receipt or authorisation reference, as the cashier read it.
+  /// Required by the server for such a tender, so the card sale can be found in
+  /// the acquirer's settlement file.
+  final String? reference;
+
   const PosTender({
     required this.method,
     required this.amount,
@@ -695,6 +701,7 @@ class PosTender {
     this.customerId,
     this.terminalId,
     this.terminalReceiptLine,
+    this.reference,
   });
 
   /// Whether this tender has to be approved by a terminal before it is recorded.
@@ -708,6 +715,7 @@ class PosTender {
         customerId: customerId,
         terminalId: terminalId,
         terminalReceiptLine: receiptLine,
+        reference: reference,
       );
 
   /// Payment-svc method code (store credit is recorded as a VOUCHER tender).

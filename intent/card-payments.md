@@ -7,7 +7,7 @@
 | **Roadmap** | new: the flow catalogue (artifact R391n2d2cV23sdKHKUnpGc), online and POS domains |
 | **Services** | payment-svc owns provider connections, payment settings, intents, attempts, provider refunds and the till card rule · order-svc confirms on authorisation, holds handover for an unpaid pay-now order and cancels through the event it already publishes · tenant-svc gives the business's profile and stores (through `TenantProfiles`) · notification-svc says what happened · purchase-svc posts as it does today · the gateway opens one public webhook route · the app gets the pay step, the settings screen, the review queue and the till's card rules |
 | **Builds on** | `PaymentProvider` (STRIPE, MANUAL; `RAZORPAY` a constant only), `PaymentProviders.forTenant` (sandbox → MANUAL), `StripePaymentProvider` (manual capture, webhook signature, dispute parsing), `payment_intents`, `POST /payments/intents`, `/intents/{id}/capture`, `/webhooks/{provider}`, `webhook_events` dedupe, `POST /payments/online` (single and group), `OrderPaymentGuard`, `card_terminals`/`terminal_payments`, `TerminalService`, `refundTx`/`refund_tenders`, `DisputeService.fromProvider`, settlement parsers (Stripe, Adyen, canonical), `PendingOrderSweeper`, `TenantProfiles`, `SealedSecrets`, gateway `JwtAuthFilter` webhook route, k6 `gateway-card-data-guard`, `docs/ACCOUNTING-CONNECTORS.md` and purchase-svc `client.accounting` (the driver pattern) |
-| **Built in** | not yet |
+| **Built in** | slice 1 (the till's card rule) 9 Oct 2026: payment-svc `CardTenderRule`, V13 `store_card_settings`, `payment_tenders.entry_mode`, `PUT /admin/payments/stores/{id}/standalone-card`, the POS reference prompt; slices 2 onward not yet |
 
 ## Problem
 
@@ -252,12 +252,12 @@ create ─► REQUIRES_ACTION ─(3DS passed)─► AUTHORIZED ─(capture)─�
 
 Tenant isolation and refusals are marked (T) and (R).
 
-- [ ] Slice 1. A CARD `POST /payments` at a store with an ACTIVE terminal is refused `409 PAYMENT_CARD_NEEDS_TERMINAL` (R) — `CardTenderRuleIT.cardNeedsTerminalWhereOneIsRegistered`
-- [ ] With the store allowed standalone, the tender carries `STANDALONE` and its reference; without a reference `400 PAYMENT_CARD_REFERENCE_REQUIRED` (R) — `CardTenderRuleIT.standaloneNeedsReference`
-- [ ] A retired terminal alone does not count as a terminal — `CardTenderRuleIT.retiredTerminalIsNoTerminal`
-- [ ] A manager or cashier cannot allow a standalone machine; the change is logged with who and when (R) — `CardTenderRuleIT.onlyOwnerAllowsStandalone`
-- [ ] Another business's owner cannot set or read our store's setting (T) — `CardTenderRuleIT.otherTenantCannotTouchStoreSetting`
-- [ ] An approved terminal attempt still writes its tender as `TERMINAL` — `TerminalPaymentIT` (extended)
+- [x] Slice 1. A CARD `POST /payments` at a store with an ACTIVE terminal is refused `409 PAYMENT_CARD_NEEDS_TERMINAL` (R) — `CardTenderRuleIT.cardNeedsTerminalWhereOneIsRegistered`; stack: k6 `card-rule-flow`.
+- [x] With the store allowed standalone, the tender carries `STANDALONE` and its reference; without a reference `400 PAYMENT_CARD_REFERENCE_REQUIRED` (R) — `CardTenderRuleIT.standaloneNeedsReference`, `CardTenderRuleTest`; stack: `card-rule-flow`.
+- [x] A retired terminal alone does not count as a terminal — `CardTenderRuleIT.retiredTerminalIsNoTerminal`.
+- [x] A manager or cashier cannot allow a standalone machine; the change is logged with who and when (R) — `CardTenderRuleIT.onlyOwnerAllowsStandalone`; stack: `card-rule-flow`.
+- [x] Another business's owner cannot set or read our store's setting (T) — `CardTenderRuleIT.otherTenantCannotTouchStoreSetting`; stack: `card-rule-flow`.
+- [x] An approved terminal attempt still writes its tender as `TERMINAL` — `TerminalSettlementIT` (the tender recorded from a named attempt has `entry_mode = TERMINAL`, no reference needed).
 - [x] Slice 2. A webhook arriving before the intent has its provider reference is applied through our metadata id, and one for an unknown intent of ours is answered non-2xx, not marked seen — `WebhookOrderingIT.eventBeforeReferenceIsApplied`, `WebhookOrderingIT.unknownIntentIsRedelivered`
 - [ ] A sandbox business can only reach SIMULATED, whatever the deployment configures — `PaymentProvidersTest.sandboxReachesOnlySimulated`; `create` calls the tenant's provider, never `active()` — `PaymentIntentServiceTest.createUsesTenantProvider`
 - [ ] Partial capture sends `amount_to_capture` and the tender's reference is the charge, matched by the settlement parser — `StripeRequestShapeTest.captureAmount`, `SettlementIT.onlineCaptureMatched`

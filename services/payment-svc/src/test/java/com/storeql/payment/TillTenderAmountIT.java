@@ -132,7 +132,7 @@ class TillTenderAmountIT {
   void aCashSaleWithChangeIsTaken() {
     taken(GB, GB_STORE, "3.3000000000000003", "CASH", "3.30");
     // The back office's "collect outstanding": 25.99 less 10.00 already paid.
-    taken(GB, GB_STORE, "15.989999999999998", "CARD", "15.99");
+    taken(GB, GB_STORE, "15.989999999999998", "CASH", "15.99");
     // A weighed 0.375 kg at 12.99, a line the till never rounds and order-svc totals to 4.87.
     taken(GB, GB_STORE, "4.87125", "CASH", "4.87");
   }
@@ -141,9 +141,9 @@ class TillTenderAmountIT {
   @DisplayName("Dinars keep three places and yen none: the till's figure is taken at each")
   void dinarsAndYen() {
     taken(KW, KW_STORE, "3.3000000000000003", "CASH", "3.300");
-    taken(KW, KW_STORE, "1.125", "CARD", "1.125");
+    taken(KW, KW_STORE, "1.125", "CASH", "1.125");
     taken(JP, JP_STORE, "487.125", "CASH", "487");
-    taken(JP, JP_STORE, "1250.0", "CARD", "1250");
+    taken(JP, JP_STORE, "1250.0", "CASH", "1250");
   }
 
   @Test

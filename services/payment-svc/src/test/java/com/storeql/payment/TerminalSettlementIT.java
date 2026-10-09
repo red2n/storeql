@@ -205,6 +205,36 @@ class TerminalSettlementIT {
     return a.data();
   }
 
+  /**
+   * The owner lets {@code store} record a card taken on a standalone machine, as the owner does.
+   */
+  private void allowStandalone(UUID store) {
+    Answer a =
+        ItCalls.call(
+            target,
+            "PUT",
+            "/admin/payments/stores/" + store + "/standalone-card",
+            owner,
+            "{\"allowed\":true}",
+            null);
+    assertThat(a.body().toString(), a.status(), is(200));
+  }
+
+  /** As {@link #record}, a typed card carrying the machine's receipt reference. */
+  private Answer recordTyped(Caller who, UUID order, String amount, String key) {
+    return ItCalls.call(
+        target,
+        "POST",
+        "/payments",
+        who,
+        "{\"orderId\":\""
+            + order
+            + "\",\"amount\":"
+            + amount
+            + ",\"method\":\"CARD\",\"reference\":\"AUTH 4821\"}",
+        key);
+  }
+
   private Answer record(
       Caller who, UUID order, String amount, String method, String attemptId, String key) {
     return ItCalls.call(
@@ -365,6 +395,13 @@ class TerminalSettlementIT {
     assertThat(
         scalar("SELECT payment_id FROM payment.terminal_payments WHERE id = '" + attempt + "'"),
         is(tender.data().getString("id")));
+    // recorded from the machine's approval, so it needs no reference and is entered as a terminal's
+    assertThat(
+        scalar(
+            "SELECT entry_mode FROM payment.payment_tenders WHERE id = '"
+                + tender.data().getString("id")
+                + "'"),
+        is("TERMINAL"));
     assertThat(unsettled(cashier, t.id()).list(), hasSize(0));
     Answer after = sale(cashier, t.id(), Ids.newId(), "7.00", Ids.newId().toString());
     assertThat(after.body().toString(), after.status(), is(201));
@@ -639,7 +676,12 @@ class TerminalSettlementIT {
     Terminals.Terminal t = machine();
     UUID order = Ids.newId();
     String attempt = approved(t.id(), order, "15.00").getString("id");
-    Answer tender = record(cashier, order, "15.00", "CARD", null, Ids.newId().toString());
+    // Where the store has a machine a typed card is refused, unless the owner has allowed a
+    // standalone one; then it is typed with a reference, and the approval is still found.
+    Answer refused = record(cashier, order, "15.00", "CARD", null, Ids.newId().toString());
+    assertThat(refused.code(), is("PAYMENT_CARD_NEEDS_TERMINAL"));
+    allowStandalone(HERE);
+    Answer tender = recordTyped(cashier, order, "15.00", Ids.newId().toString());
     assertThat(tender.body().toString(), tender.status(), is(201));
     assertThat(
         scalar("SELECT payment_id FROM payment.terminal_payments WHERE id = '" + attempt + "'"),
@@ -1301,8 +1343,12 @@ class TerminalSettlementIT {
     assertThat(dueOf(order), is("REFUNDED/9.03/unrecorded"));
     assertThat("nothing was in the books to reverse", refundsOf(order), is("0/0.00/-"));
 
+    allowStandalone(HERE);
     for (String named : new String[] {attempt, null}) {
-      Answer replay = record(cashier, order, "9.03", "CARD", named, Ids.newId().toString());
+      Answer replay =
+          named == null
+              ? recordTyped(cashier, order, "9.03", Ids.newId().toString())
+              : record(cashier, order, "9.03", "CARD", named, Ids.newId().toString());
       assertThat(replay.body().toString(), replay.status(), is(409));
       assertThat(replay.code(), is("PAYMENT_ORDER_GIVEN_UP"));
     }
@@ -1359,8 +1405,12 @@ class TerminalSettlementIT {
             + "', '"
             + Ids.newId()
             + "', 'Order cancelled', now())");
+    allowStandalone(HERE);
     for (String named : new String[] {null, attempt}) {
-      Answer refused = record(cashier, order, "11.00", "CARD", named, Ids.newId().toString());
+      Answer refused =
+          named == null
+              ? recordTyped(cashier, order, "11.00", Ids.newId().toString())
+              : record(cashier, order, "11.00", "CARD", named, Ids.newId().toString());
       assertThat(refused.body().toString(), refused.status(), is(409));
       assertThat(refused.code(), is("PAYMENT_ORDER_GIVEN_UP"));
       assertThat(details(refused), containsString("orderId=" + order));

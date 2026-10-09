@@ -3,6 +3,7 @@ package com.storeql.payment.service;
 import com.storeql.ids.Ids;
 import com.storeql.payment.client.OrderClient;
 import com.storeql.payment.domain.CardSettlement;
+import com.storeql.payment.domain.CardTenderRule;
 import com.storeql.payment.domain.Domain.PaymentTender;
 import com.storeql.payment.domain.Domain.RefundTender;
 import com.storeql.payment.dto.Dtos.RecordRefundRequest;
@@ -66,6 +67,8 @@ public class PaymentService {
   @Inject com.storeql.payment.client.TenantStoreClient storeClient;
   @Inject com.storeql.payment.client.CustomerClient customerClient;
   @Inject TerminalService terminals;
+  @Inject com.storeql.payment.repo.TerminalRepository terminalRepo;
+  @Inject com.storeql.payment.repo.CardSettingsRepository cardSettings;
 
   /**
    * Staff-recorded tender (POS/back-office) — the caller's role is the trust boundary.
@@ -113,8 +116,69 @@ public class PaymentService {
           "A tender comes to nothing at "
               + (currency == null ? "four decimal places" : currency + "'s minor unit"));
     }
+    // A caller held to exactly one store takes a card there when the tender names none.
+    UUID heldStore = ctx.storeIds().size() == 1 ? ctx.storeIds().iterator().next() : null;
     return capture(
-        withAmount(req, amount), tenantId, Ids.parse(req.orderId()), storeId, idempotencyKey);
+        withAmount(req, amount),
+        tenantId,
+        Ids.parse(req.orderId()),
+        storeId,
+        idempotencyKey,
+        new Till(heldStore));
+  }
+
+  /**
+   * A tender typed in at a till: held to the till's card rule. The store its caller is held to, if
+   * one.
+   */
+  private record Till(UUID heldStore) {}
+
+  /**
+   * The till's card rule for a CARD tender typed in at a till (intent card-payments, slice 1).
+   *
+   * @throws ApiException 409 {@code PAYMENT_CARD_NEEDS_TERMINAL} where the store has a card machine
+   *     and the owner has not allowed a standalone one; 400 {@code PAYMENT_CARD_REFERENCE_REQUIRED}
+   *     (or {@code _INVALID}) where a typed tender is allowed but carries no usable reference
+   */
+  private CardTenderRule.Decision cardRule(
+      UUID tenantId, UUID storeId, UUID orderId, RecordTenderRequest req) {
+    boolean names = req.terminalPaymentId() != null && !req.terminalPaymentId().isBlank();
+    UUID store = storeId;
+    if (!names && store == null) {
+      // The order's own store is where the money was taken; a till names it, a caller that did not
+      // is asked about the order. An order-svc that cannot answer leaves the reference rule only.
+      try {
+        var order = orderClient.getOrder(tenantId, orderId);
+        store = order == null || order.storeId() == null ? null : Ids.parse(order.storeId());
+      } catch (ApiException e) {
+        if (e.status() < 500) throw e;
+      }
+    }
+    boolean hasMachine = !names && store != null && terminalRepo.hasActiveAt(tenantId, store);
+    boolean standalone = hasMachine && cardSettings.standaloneAllowed(tenantId, store);
+    CardTenderRule.Decision decision =
+        CardTenderRule.decide(names, hasMachine, standalone, req.reference());
+    if (!decision.allowed()) {
+      throw new ApiException(
+          decision.refusalStatus(), decision.refusalCode(), decision.refusal(), List.of());
+    }
+    return decision;
+  }
+
+  /** The same tender with the reference as typed, trimmed. */
+  private static RecordTenderRequest withReference(RecordTenderRequest req, String reference) {
+    return new RecordTenderRequest(
+        req.orderId(),
+        req.amount(),
+        req.method(),
+        reference,
+        req.idempotencyKey(),
+        req.notes(),
+        req.storeId(),
+        req.customerId(),
+        req.currency(),
+        req.groupId(),
+        req.terminalPaymentId());
   }
 
   /** The same tender at another amount: the one the till meant, at the currency's units. */
@@ -214,6 +278,22 @@ public class PaymentService {
 
   private PaymentTender capture(
       RecordTenderRequest req, UUID tenantId, UUID orderId, UUID storeId, String idempotencyKey) {
+    return capture(req, tenantId, orderId, storeId, idempotencyKey, null);
+  }
+
+  /**
+   * @param till set when the tender is staff-recorded (a till), so a CARD one is held to the till's
+   *     card rule; null for an online payment
+   */
+  private PaymentTender capture(
+      RecordTenderRequest typed,
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      String idempotencyKey,
+      Till till) {
+    RecordTenderRequest req = typed;
+    String entryMode = null;
     String method = req.method().toUpperCase(Locale.ROOT);
     if (!VALID_METHODS.contains(method))
       throw ApiException.badRequest(
@@ -228,6 +308,14 @@ public class PaymentService {
           "charge the card through order-svc's redeem; the tender follows");
     }
     requireMethodEnabledForStore(tenantId, storeId, method);
+    if (till != null && PaymentTender.METHOD_CARD.equals(method)) {
+      CardTenderRule.Decision rule =
+          cardRule(tenantId, storeId != null ? storeId : till.heldStore(), orderId, req);
+      entryMode = rule.entryMode();
+      if (CardTenderRule.STANDALONE.equals(entryMode)) {
+        req = withReference(req, rule.reference());
+      }
+    }
     if (PaymentTender.METHOD_CASH.equals(method)) {
       requireUnderCashLimit(tenantId, orderId, storeId, req);
     }
@@ -257,7 +345,9 @@ public class PaymentService {
     // A card machine's approval named by the till is recorded as exactly this tender, or refused;
     // that is what settles the machine for its next sale.
     if (attemptId != null) return repo.createTerminalTender(tender, captured, attemptId);
-    return repo.createTender(tender, captured);
+    return entryMode == null
+        ? repo.createTender(tender, captured)
+        : repo.createTender(tender, captured, entryMode);
   }
 
   /**

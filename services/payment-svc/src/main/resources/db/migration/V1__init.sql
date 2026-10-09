@@ -21,7 +21,12 @@ CREATE TABLE IF NOT EXISTS payment_tenders (
     -- The store the money was taken at, so Z-reports aggregate by store without joining order-svc
     -- (database-per-service). Null where the payment named no store.
     store_id        UUID,
+    -- How a till CARD tender came to be recorded: TERMINAL (a card machine StoreQL drives approved it)
+    -- or STANDALONE (the cashier recorded what a machine StoreQL does not see took, with that machine's
+    -- receipt reference). Null for every other tender and for a card paid online.
+    entry_mode      VARCHAR(12),
     PRIMARY KEY (tenant_id, id),
+    CONSTRAINT chk_payment_tenders_entry_mode CHECK (entry_mode IS NULL OR entry_mode IN ('TERMINAL', 'STANDALONE')),
     CONSTRAINT chk_payment_tenders_method CHECK (
         method IN ('CASH', 'CARD', 'UPI', 'WALLET', 'GIFT_CARD', 'VOUCHER', 'STORE_CREDIT',
                    'EXCHANGE')

@@ -85,7 +85,10 @@ class CashLimitIT {
                     + store
                     + "\",\"currency\":\""
                     + currency
-                    + "\"}",
+                    + "\""
+                    // a card typed at a till carries the machine's receipt reference
+                    + ("CARD".equals(method) ? ",\"reference\":\"AUTH 1\"" : "")
+                    + "}",
                 MediaType.APPLICATION_JSON));
   }
 

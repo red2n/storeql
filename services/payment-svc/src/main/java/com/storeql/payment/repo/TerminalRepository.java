@@ -87,6 +87,20 @@ public class TerminalRepository extends BaseOutboxRepository {
         "card terminals");
   }
 
+  /** Whether the store has at least one ACTIVE card machine (a retired one is no machine). */
+  public boolean hasActiveAt(UUID tenantId, UUID storeId) {
+    return !query(
+            "SELECT 1 FROM card_terminals WHERE tenant_id = ? AND store_id = ? AND status = 'ACTIVE'"
+                + " LIMIT 1",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, storeId);
+            },
+            rs -> 1,
+            "store has an active card machine")
+        .isEmpty();
+  }
+
   public Optional<Terminal> find(UUID tenantId, UUID id) {
     return query(
             TERMINAL_COLUMNS + " WHERE tenant_id = ? AND id = ?",

@@ -35,6 +35,14 @@ public class PaymentRepository extends BaseOutboxRepository {
    * surface as an error (golden rule #11).
    */
   public PaymentTender createTender(PaymentTender t, OutboxRow event) {
+    return createTender(t, event, null);
+  }
+
+  /**
+   * As {@link #createTender(PaymentTender, OutboxRow)}, recording how a till card tender was
+   * entered.
+   */
+  public PaymentTender createTender(PaymentTender t, OutboxRow event, String entryMode) {
     return inTx(
         c -> {
           if (t.idempotencyKey() != null) {
@@ -43,7 +51,7 @@ public class PaymentRepository extends BaseOutboxRepository {
               return existing;
             }
           }
-          insertTenderTx(c, t);
+          insertTenderTx(c, t, entryMode);
           insertOutbox(c, event);
           if (PaymentTender.METHOD_CARD.equals(t.method())) recordMatchingApprovalTx(c, t);
           return t;
@@ -156,7 +164,7 @@ public class PaymentRepository extends BaseOutboxRepository {
           if (refusal != null) {
             throw com.storeql.web.ApiException.conflict(refusal, LINK_REFUSALS.get(refusal));
           }
-          insertTenderTx(c, t);
+          insertTenderTx(c, t, "TERMINAL");
           insertOutbox(c, event);
           CardSettlementSql.recordAsTx(c, t.tenantId(), sale.id(), t.id());
           return t;
@@ -177,12 +185,17 @@ public class PaymentRepository extends BaseOutboxRepository {
 
   private static void insertTenderTx(java.sql.Connection c, PaymentTender t)
       throws java.sql.SQLException {
+    insertTenderTx(c, t, null);
+  }
+
+  private static void insertTenderTx(java.sql.Connection c, PaymentTender t, String entryMode)
+      throws java.sql.SQLException {
     try (var ps =
         c.prepareStatement(
             "INSERT INTO payment_tenders"
                 + " (id, tenant_id, order_id, amount, method, reference,"
-                + "  idempotency_key, status, notes, created_at, store_id)"
-                + " VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
+                + "  idempotency_key, status, notes, created_at, store_id, entry_mode)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")) {
       ps.setObject(1, t.id());
       ps.setObject(2, t.tenantId());
       ps.setObject(3, t.orderId());
@@ -195,6 +208,7 @@ public class PaymentRepository extends BaseOutboxRepository {
       // pgjdbc cannot infer a SQL type for a raw java.time.Instant.
       ps.setObject(10, t.createdAt().atOffset(java.time.ZoneOffset.UTC));
       ps.setObject(11, t.storeId());
+      ps.setString(12, entryMode);
       ps.executeUpdate();
     }
   }
