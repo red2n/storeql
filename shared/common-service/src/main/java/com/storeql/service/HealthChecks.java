@@ -92,6 +92,34 @@ public final class HealthChecks {
   }
 
   /**
+   * Readiness probe: DOWN, in {@code strict} migrate mode, until the schema is at this build's
+   * version, so a service never serves a half-migrated schema. Never DOWN in {@code lenient} or
+   * {@code off} mode (see {@link FlywayRunner}).
+   */
+  @Readiness
+  @ApplicationScoped
+  public static class SchemaReadiness implements HealthCheck {
+    @Inject FlywayRunner runner;
+
+    /**
+     * @return {@code "schema"}, DOWN while a strict deployment's migrations have not run, with the
+     *     reason as data
+     */
+    @Override
+    public HealthCheckResponse call() {
+      boolean held = runner.holdsReadiness();
+      FlywayRunner.MigrationFailedException failed = runner.failure();
+      String detail =
+          !held
+              ? "migrated"
+              : failed != null
+                  ? "a migration failed; see the log"
+                  : "waiting for the database; migrating as soon as it answers";
+      return HealthCheckResponse.named("schema").status(!held).withData("detail", detail).build();
+    }
+  }
+
+  /**
    * A consumer that fails to start (bad bootstrap config, broker unreachable, etc.) must not leave
    * the service silently "ready" while it never processes another event — see {@link
    * KafkaConsumerRegistry}.

@@ -125,39 +125,75 @@ services:
   iam-svc:
     environment:
       storeql.db.password: ${IAM_DB_PASSWORD:?Set IAM_DB_PASSWORD in .env and ALTER ROLE iam to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   tenant-svc:
     environment:
       storeql.db.password: ${TENANT_DB_PASSWORD:?Set TENANT_DB_PASSWORD in .env and ALTER ROLE tenant to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   inventory-svc:
     environment:
       storeql.db.password: ${INVENTORY_DB_PASSWORD:?Set INVENTORY_DB_PASSWORD in .env and ALTER ROLE inventory to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   order-svc:
     environment:
       storeql.db.password: ${ORDER_DB_PASSWORD:?Set ORDER_DB_PASSWORD in .env and ALTER ROLE order to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   purchase-svc:
     environment:
       storeql.db.password: ${PURCHASE_DB_PASSWORD:?Set PURCHASE_DB_PASSWORD in .env and ALTER ROLE purchase to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   cart-svc:
     environment:
       storeql.db.password: ${CART_DB_PASSWORD:?Set CART_DB_PASSWORD in .env and ALTER ROLE cart to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   pricing-svc:
     environment:
       storeql.db.password: ${PRICING_DB_PASSWORD:?Set PRICING_DB_PASSWORD in .env and ALTER ROLE pricing to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   payment-svc:
     environment:
       storeql.db.password: ${PAYMENT_DB_PASSWORD:?Set PAYMENT_DB_PASSWORD in .env and ALTER ROLE payment to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   product-svc:
     environment:
       storeql.db.password: ${PRODUCT_DB_PASSWORD:?Set PRODUCT_DB_PASSWORD in .env and ALTER ROLE product to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   customer-svc:
     environment:
       storeql.db.password: ${CUSTOMER_DB_PASSWORD:?Set CUSTOMER_DB_PASSWORD in .env and ALTER ROLE customer to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   notification-svc:
     environment:
       storeql.db.password: ${NOTIFICATION_DB_PASSWORD:?Set NOTIFICATION_DB_PASSWORD in .env and ALTER ROLE notification to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
   reporting-svc:
     environment:
       storeql.db.password: ${REPORTING_DB_PASSWORD:?Set REPORTING_DB_PASSWORD in .env and ALTER ROLE reporting to match}
+      # strict: a migration that fails stops the service, and /health/ready is DOWN until the schema is migrated
+      # (shared/common-service FlywayRunner; the base file leaves lenient for dev and k6)
+      storeql.db.migrate.mode: strict
 
 volumes:
   caddy_data:
