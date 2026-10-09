@@ -426,13 +426,24 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
       });
       return;
     }
+    // The drawer the cash goes back out of is settled first: a read of the open
+    // till still in flight, or failed a moment ago, is given a few seconds
+    // ([SaleTillNotifier.settle]) rather than the refund going out naming none.
+    // Never refused over it: with no drawer the refund is "not at a till".
+    final tillCtl = ref.read(saleTillProvider.notifier);
+    if (!tillCtl.settled) {
+      setState(() => _submitting = true);
+      await tillCtl.settle();
+      if (!mounted) return;
+      setState(() => _submitting = false);
+    }
     final body = <String, dynamic>{
       'reason': _reason,
       'refundMethod': _method,
       if (topUp) 'giftCardCode': giftCode,
       if (_recall != null) 'recallNoticeId': _recall!.id,
       // The drawer the cash goes back out of, so its report counts it.
-      'tillSessionId': ?ref.read(saleTillProvider).value,
+      'tillSessionId': ?tillCtl.drawer,
       'items': items,
     };
     final key = _keyForAttempt(

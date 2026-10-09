@@ -1,13 +1,18 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/network/api_client.dart';
 import 'package:storeql_app/features/admin/providers/admin_providers.dart';
+import 'package:storeql_app/features/pos/cash_providers.dart';
 import 'package:storeql_app/features/pos/cash_screen.dart';
 import 'package:storeql_app/features/pos/pos_providers.dart';
+
+import '../../support/fake_api.dart';
 
 // ---------------------------------------------------------------------------
 // The till's open session lives on the server, not in the app. After a reload,
@@ -33,6 +38,9 @@ class _Server implements HttpClientAdapter {
   _Server({this.current, this.notAtTill});
 
   String? current;
+
+  /// While set, opening or closing a till is not answered (a slow network).
+  Completer<void>? holdWrites;
 
   /// The `notAtTill` member the X report answers with, when a test wants one.
   final Map<String, dynamic>? notAtTill;
@@ -102,8 +110,27 @@ class _Server implements HttpClientAdapter {
       }, 200);
     }
     if (o.method == 'POST' && path.endsWith('/admin/cash/till-sessions')) {
+      await holdWrites?.future;
       current = _newId;
       return _json({'data': _session(_newId)}, 201);
+    }
+    if (o.method == 'POST' && path.endsWith('/close')) {
+      await holdWrites?.future;
+      final id = current;
+      current = null;
+      return _json({
+        'data': {
+          'tillSessionId': id,
+          'floatAmount': 100,
+          'cashDropsTotal': 0,
+          'expectedCashInTill': 142.5,
+          'grossSales': 42.5,
+          'totalRefunds': 0,
+          'netSales': 42.5,
+          'countedCash': 142.5,
+          'overShort': 0,
+        }
+      }, 200);
     }
     return _json({'data': []}, 200);
   }
@@ -132,6 +159,47 @@ Future<_Server> _pump(WidgetTester tester, _Server server) async {
   ));
   await tester.pumpAndSettle();
   return server;
+}
+
+
+/// The Cash screen inside a terminal: the screen can be left (and its providers
+/// with it) while the terminal, and the drawer sales name, stay on.
+Future<({ProviderContainer container, ValueNotifier<bool> shown})> _pumpShell(
+    WidgetTester tester, _Server server) async {
+  final dio = Dio(BaseOptions(baseUrl: 'http://test'))
+    ..httpClientAdapter = server;
+  final shown = ValueNotifier(true);
+  await tester.pumpWidget(ProviderScope(
+    overrides: [
+      apiClientProvider.overrideWithValue(_FakeApiClient(dio)),
+      authNotifierProvider.overrideWith(() => RoleAuth('CASHIER')),
+      posStoreProvider.overrideWith((ref) => _storeId),
+      posStoresProvider.overrideWith((ref) async => const [
+            StoreInfo(
+              id: _storeId,
+              name: 'High Street',
+              code: 'HS',
+              type: 'STORE',
+              status: 'ACTIVE',
+            ),
+          ]),
+    ],
+    child: MaterialApp(
+      home: Scaffold(
+        body: ValueListenableBuilder<bool>(
+          valueListenable: shown,
+          builder: (_, on, _) =>
+              on ? const CashScreen() : const SizedBox(key: Key('elsewhere')),
+        ),
+      ),
+    ),
+  ));
+  final container =
+      ProviderScope.containerOf(tester.element(find.byType(Scaffold)));
+  await container.read(authNotifierProvider.future);
+  // The POS shell watches the open till from the moment the terminal is on.
+  container.read(saleTillProvider);
+  return (container: container, shown: shown);
 }
 
 Finder get _openTillButton => find.widgetWithText(FilledButton, 'Open till');
@@ -221,5 +289,120 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Till session'), findsOneWidget);
     expect(_openTillButton, findsNothing);
+  });
+  group('the drawer sales name follows the Cash screen', () {
+    testWidgets('opening a till makes it the drawer sales name',
+        (tester) async {
+      final (:container, :shown) = await _pumpShell(tester, _Server());
+      await tester.pumpAndSettle();
+      expect(container.read(saleTillProvider).value, isNull);
+
+      await tester.tap(_openTillButton);
+      await tester.pumpAndSettle();
+
+      expect(container.read(saleTillProvider).value, _newId);
+      expect(shown.value, isTrue);
+    });
+
+    testWidgets('closing it makes the drawer none', (tester) async {
+      final (:container, shown: _) =
+          await _pumpShell(tester, _Server(current: _openId));
+      await tester.pumpAndSettle();
+      expect(container.read(saleTillProvider).value, _openId);
+
+      await tester.ensureVisible(find.widgetWithText(FilledButton, 'Close till'));
+      await tester.tap(find.widgetWithText(FilledButton, 'Close till'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.widgetWithText(FilledButton, 'Close till')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Till closed'), findsOneWidget);
+      expect(container.read(saleTillProvider).value, isNull);
+    });
+
+    testWidgets(
+        'a till open on the server is the drawer sales name once the Cash '
+        'screen has seen it, though the terminal started before it was open',
+        (tester) async {
+      // Opened on another device at the counter after this terminal started:
+      // the terminal's own first look found none.
+      final server = _Server();
+      final (:container, :shown) = await _pumpShell(tester, server);
+      shown.value = false;
+      await tester.pumpAndSettle();
+      expect(container.read(saleTillProvider).value, isNull);
+
+      server.current = _openId;
+      shown.value = true;
+      await tester.pumpAndSettle();
+
+      expect(find.text('Till session'), findsOneWidget,
+          reason: 'the screen shows the drawer that is open');
+      expect(container.read(saleTillProvider).value, _openId,
+          reason: 'and the sales it takes now are counted in it');
+    });
+
+    testWidgets(
+        'and a retry that finds it heals a first read that failed',
+        (tester) async {
+      final server = _Server(current: _down);
+      final (:container, shown: _) = await _pumpShell(tester, server);
+      await tester.pumpAndSettle();
+      expect(find.text('Try again'), findsOneWidget);
+      expect(container.read(saleTillProvider).value, isNull);
+
+      server.current = _openId;
+      await tester.tap(find.text('Try again'));
+      await tester.pumpAndSettle();
+
+      expect(container.read(saleTillProvider).value, _openId);
+    });
+
+    testWidgets(
+        'a till opened while the cashier is already on another tab is still '
+        'the drawer sales name', (tester) async {
+      final server = _Server()..holdWrites = Completer<void>();
+      final (:container, :shown) = await _pumpShell(tester, server);
+      await tester.pumpAndSettle();
+
+      // Open till is pressed; the answer is slow; the cashier goes to Sale.
+      await tester.tap(_openTillButton);
+      await tester.pump();
+      shown.value = false;
+      await tester.pump();
+      server.holdWrites!.complete();
+      await tester.pumpAndSettle();
+
+      expect(server.current, _newId, reason: 'the till is open on the server');
+      expect(container.read(saleTillProvider).value, _newId,
+          reason: 'so the sales that follow must name it');
+    });
+
+    testWidgets(
+        'a till closed while the cashier is already on another tab is no '
+        'longer the drawer sales name', (tester) async {
+      final server = _Server(current: _openId)..holdWrites = Completer<void>();
+      final (:container, :shown) = await _pumpShell(tester, server);
+      await tester.pumpAndSettle();
+      expect(container.read(saleTillProvider).value, _openId);
+
+      await tester.ensureVisible(find.widgetWithText(FilledButton, 'Close till'));
+      await tester.tap(find.widgetWithText(FilledButton, 'Close till'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.widgetWithText(FilledButton, 'Close till')));
+      await tester.pump();
+      shown.value = false;
+      await tester.pump();
+      server.holdWrites!.complete();
+      await tester.pumpAndSettle();
+
+      expect(server.current, isNull, reason: 'the till is closed on the server');
+      expect(container.read(saleTillProvider).value, isNull,
+          reason: 'so no sale may name a closed drawer');
+    });
   });
 }

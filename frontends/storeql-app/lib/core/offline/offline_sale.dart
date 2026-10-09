@@ -345,10 +345,15 @@ bool tillSessionRefused(Object error, Map<String, dynamic> body) =>
 /// has been taken and must be recorded, so the tender is sent again naming
 /// none: the report then shows it as "not at a till" for a manager to place.
 /// Same key, because the refusal wrote nothing.
+///
+/// [onTillSessionRefused] is told which session the server refused, so the
+/// caller can read the open till again and the next sale names the right one;
+/// it is best-effort and can never hold up the money being recorded.
 Future<void> postTender(
   Dio dio,
   Map<String, dynamic> data, {
   required String idempotencyKey,
+  void Function(String sessionId)? onTillSessionRefused,
 }) async {
   Future<void> send(Map<String, dynamic> body) => dio.post(
         '/${ApiConstants.payment}/payments',
@@ -359,6 +364,11 @@ Future<void> postTender(
     await send(data);
   } catch (e) {
     if (!tillSessionRefused(e, data)) rethrow;
+    try {
+      onTillSessionRefused?.call('${data['tillSessionId']}');
+    } catch (_) {
+      // The record of the money comes first.
+    }
     await send({...data}..remove('tillSessionId'));
   }
 }

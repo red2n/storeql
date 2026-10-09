@@ -1,5 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/auth/auth_notifier.dart';
+import '../../core/auth/auth_state.dart';
 import '../../core/constants.dart';
 import '../../core/network/api_client.dart';
 import 'pos_providers.dart';
@@ -13,7 +15,9 @@ import 'pos_providers.dart';
 /// the screen goes) and whenever the store changes; opening or closing a till
 /// on this screen sets it at once. A failed read is an error the screen shows
 /// beside *Open till*, with its own *Try again* — never a guess that no till
-/// is open, and not retried behind the cashier's back.
+/// is open, and not retried behind the cashier's back. This holds what the
+/// screen shows; the drawer the sales name is [saleTillProvider], which the
+/// screen keeps in step (what it reads, and what it opens or closes).
 final activeTillProvider =
     AsyncNotifierProvider.autoDispose<ActiveTillNotifier, String?>(
         ActiveTillNotifier.new,
@@ -28,48 +32,140 @@ class ActiveTillNotifier extends AsyncNotifier<String?> {
   }
 
   /// A till was just opened here.
-  void opened(String sessionId) {
-    state = AsyncData(sessionId);
-    ref.read(saleTillProvider.notifier).opened(sessionId);
-  }
+  void opened(String sessionId) => state = AsyncData(sessionId);
 
   /// The till was just closed.
-  void closed() {
-    state = const AsyncData(null);
-    ref.read(saleTillProvider.notifier).closed();
-  }
+  void closed() => state = const AsyncData(null);
 }
 
-/// The till session this terminal's sales are counted in: the open one at its
-/// store, or null when none is (or it cannot be read).
+/// The person signed in, or null when nobody is. A change of person is what
+/// [saleTillProvider] must start again for; a refreshed token of the same person
+/// is not.
+final _signedInUserProvider = Provider<String?>((ref) => ref.watch(
+      authNotifierProvider.select((a) {
+        final auth = a.value;
+        return auth is AuthAuthenticated && auth.userId.isNotEmpty
+            ? auth.userId
+            : null;
+      }),
+    ));
+
+/// The till session this terminal's sales are counted in: the open one of **the
+/// person signed in**, at this store, or null when there is none.
 ///
 /// Every tender, and every return, a sale sends names it, so the drawer's X
 /// report and close count exactly the money that went through it. It lives for
-/// as long as the terminal is on, is set at once by opening or closing a till on
-/// the Cash screen, and is read from payment-svc when the terminal starts or
-/// its store changes. It never stops a sale: if it cannot be read the sale goes
-/// unattributed ("not at a till" on the report), and if it has gone stale the
-/// server's refusal is answered by sending the tender again naming none
-/// ([postTender]).
+/// as long as the terminal is on and follows three things:
+///
+///  * **who and where** — it is read from payment-svc (the till *this person*
+///    opened at *this store*) when the terminal starts and whenever the store or
+///    the person changes, so the next cashier never rings on the last one's
+///    drawer, and a drawer of another store is never named;
+///  * **what the Cash screen sees** — opening or closing a till there sets it at
+///    once (even when the cashier has left that tab by the time the answer
+///    comes), and every answer the Cash screen reads from the server is
+///    published here ([set]), so a drawer opened on another device is named too;
+///  * **what the server refuses** — a tender it will not count in a drawer
+///    ([refused]) sends the terminal to read again.
+///
+/// A read that fails is **not** "no till": it is an error, read again at the
+/// next sale ([settle]). Nothing here ever stops a sale: when the drawer cannot
+/// be read, within a few seconds, the sale goes unattributed ("not at a till" on
+/// the report), and if one has gone stale the server's refusal is answered by
+/// sending the tender again naming none ([postTender]). Read it as
+/// `state.drawer`, never `state.value`, which would hand back the previous
+/// person's or store's drawer while a new one is being read.
 final saleTillProvider = AsyncNotifierProvider<SaleTillNotifier, String?>(
     SaleTillNotifier.new,
     retry: (_, _) => null);
 
+/// What a sale, a return or a pay-out names as its drawer: the open till as
+/// read for this store and this person, and nothing while that is being read
+/// again, has failed, or was last read for someone else.
+extension SaleDrawer on AsyncValue<String?> {
+  String? get drawer => unwrapPrevious().value;
+}
+
 class SaleTillNotifier extends AsyncNotifier<String?> {
+  /// How long a sale waits for the drawer to be read before it is rung without
+  /// one. Shorter than the client's own timeouts: a cashier is not made to wait
+  /// for a payment service that is down.
+  static const readWait = Duration(seconds: 3);
+
+  /// How many times [set] has been called, and the last value: an answer the
+  /// server is still working on is older than a till opened or closed here
+  /// meanwhile, and must not undo it.
+  int _sets = 0;
+  String? _lastSet;
+
   @override
   Future<String?> build() async {
     final storeId = ref.watch(posStoreProvider);
-    if (storeId == null) return null;
+    final userId = ref.watch(_signedInUserProvider);
+    if (storeId == null || userId == null) return null;
+    final before = _sets;
     try {
-      return await fetchOpenTill(ref.read(apiClientProvider).dio, storeId);
+      // A failure is thrown, not turned into null: "no till is open" is the
+      // server's 404 alone ([fetchOpenTill]).
+      final read =
+          await fetchOpenTill(ref.read(apiClientProvider).dio, storeId);
+      return _sets == before ? read : _lastSet;
     } catch (_) {
-      return null;
+      if (_sets != before) return _lastSet;
+      rethrow;
     }
   }
 
-  void opened(String sessionId) => state = AsyncData(sessionId);
+  /// The drawer to name now ([SaleDrawer.drawer]).
+  String? get drawer => state.drawer;
 
-  void closed() => state = const AsyncData(null);
+  /// Whether the drawer has been read for this store and this person: a sale
+  /// that finds it settled needs nothing more.
+  bool get settled => state.unwrapPrevious() is AsyncData<String?>;
+
+  /// Gives a read still in flight, or one that failed, a moment before a sale
+  /// names its drawer: waits for the one in flight, reads again once after a
+  /// failure (its own or the one it waited for), and gives up after [wait] in
+  /// all (a read still going lands for the next sale). Never throws and never
+  /// stops a sale.
+  Future<void> settle({Duration wait = readWait}) async {
+    final watch = Stopwatch()..start();
+    for (var tries = 0; tries < 2 && !settled; tries++) {
+      final left = wait - watch.elapsed;
+      if (left <= Duration.zero) return;
+      if (!state.isLoading) ref.invalidateSelf();
+      try {
+        await future.timeout(left);
+      } catch (_) {
+        // Unreadable (or too slow): the sale is rung naming none, as the
+        // Decision of 2026-10-09 says, and a later sale reads again.
+      }
+    }
+  }
+
+  /// A till was opened here, or the server's answer is [id] (null: none open).
+  /// Idempotent: an answer already held is not a change.
+  void set(String? id) {
+    _sets++;
+    _lastSet = id;
+    final now = state;
+    if (now is AsyncData<String?> && !now.isLoading && now.value == id) return;
+    state = AsyncData(id);
+  }
+
+  void opened(String sessionId) => set(sessionId);
+
+  void closed() => set(null);
+
+  /// The server would not count a tender in [sessionId] (closed, another
+  /// store's, unknown): if that is the drawer held, it is stale. Read again, so
+  /// the next sale names the drawer open now, or none.
+  void refused(String sessionId) {
+    if (drawer != sessionId) return;
+    ref.invalidateSelf();
+    // Asking for it starts the read now, though nothing is listening just now.
+    future.then<void>((_) {}, onError: (_) {});
+  }
 }
 
 /// The caller's open till session at [storeId]: its id, or null when the

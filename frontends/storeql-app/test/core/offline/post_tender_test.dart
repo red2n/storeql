@@ -116,4 +116,60 @@ void main() {
     );
     expect(server.requests, hasLength(2));
   });
+  group('a refused drawer is reported, once, to whoever reads it again', () {
+    for (final code in [
+      'TILL_SESSION_NOT_OPEN',
+      'TILL_SESSION_OTHER_STORE',
+      'TILL_SESSION_NOT_FOUND',
+    ]) {
+      test('$code: the caller is told which drawer, before the money is '
+          'sent again', () async {
+        final server = _Payments([code, null]);
+        final told = <String>[];
+
+        await postTender(_dio(server), _tender,
+            idempotencyKey: _key,
+            onTillSessionRefused: (id) {
+              told.add(id);
+              expect(server.requests, hasLength(1),
+                  reason: 'told when refused, ahead of the second send');
+            });
+
+        expect(told, [_drawer]);
+        expect(server.requests, hasLength(2));
+      });
+    }
+
+    test('nothing is reported when the tender is taken, or refused for any '
+        'other reason, or named no drawer', () async {
+      final told = <String>[];
+      await postTender(_dio(_Payments([null])), _tender,
+          idempotencyKey: _key, onTillSessionRefused: told.add);
+      await expectLater(
+        postTender(_dio(_Payments(['PAYMENT_CARD_NEEDS_TERMINAL'])), _tender,
+            idempotencyKey: _key, onTillSessionRefused: told.add),
+        throwsA(isA<DioException>()),
+      );
+      final bare = {..._tender}..remove('tillSessionId');
+      await expectLater(
+        postTender(_dio(_Payments(['TILL_SESSION_NOT_OPEN'])), bare,
+            idempotencyKey: _key, onTillSessionRefused: told.add),
+        throwsA(isA<DioException>()),
+      );
+
+      expect(told, isEmpty);
+    });
+
+    test('a listener that fails never stops the money being recorded',
+        () async {
+      final server = _Payments(['TILL_SESSION_NOT_OPEN', null]);
+
+      await postTender(_dio(server), _tender,
+          idempotencyKey: _key,
+          onTillSessionRefused: (_) => throw StateError('no listener'));
+
+      expect(server.requests, hasLength(2));
+      expect(server.requests[1].data.containsKey('tillSessionId'), isFalse);
+    });
+  });
 }

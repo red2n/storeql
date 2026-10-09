@@ -3,12 +3,14 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:storeql_app/core/auth/auth_notifier.dart';
 import 'package:storeql_app/core/auth/auth_state.dart';
 import 'package:storeql_app/core/ids.dart';
 import 'package:storeql_app/core/network/api_client.dart';
+import 'package:storeql_app/features/pos/cash_providers.dart';
 import 'package:storeql_app/features/pos/pos_providers.dart';
 import 'package:storeql_app/features/pos/returns_screen.dart';
 
@@ -72,6 +74,11 @@ class _Server implements HttpClientAdapter {
   /// Overrides the receipt lookup's answer.
   final _Reply? lookup;
 
+  /// What "which till is open" answers, in turn (the last repeats): an id,
+  /// `null` for none (404) or 'down' for a 503.
+  List<String?> openTill = [null];
+  int _asked = 0;
+
   /// Answers, in order, to POST /returns, /exchange and /returns/no-receipt.
   final List<_Reply> returnReplies = [];
   final List<_Reply> exchangeReplies = [];
@@ -99,6 +106,18 @@ class _Server implements HttpClientAdapter {
       RequestOptions o, Stream<List<int>>? s, Future<void>? c) async {
     requests.add(o);
     final path = o.path;
+    if (o.method == 'GET' && path.endsWith('/till-sessions/current')) {
+      final answer =
+          openTill[_asked < openTill.length ? _asked : openTill.length - 1];
+      _asked++;
+      if (answer == 'down') {
+        return _json(_Reply(503, _problem(503, 'SERVICE_UNAVAILABLE', 'Down.')));
+      }
+      if (answer == null) {
+        return _json(_Reply(404, _problem(404, 'TILL_SESSION_NOT_OPEN', 'None.')));
+      }
+      return _ok({'id': answer, 'status': 'OPEN', 'storeId': 'store-1'});
+    }
     if (o.method == 'GET' && path.endsWith('/orders/by-receipt')) {
       if (lookup != null) return _json(lookup!);
       return _ok({
@@ -150,10 +169,21 @@ class _Server implements HttpClientAdapter {
       .toList();
 }
 
+/// The drawer the terminal has read as open (payment-svc's till session id).
+class _Drawer extends SaleTillNotifier {
+  _Drawer(this.id);
+
+  final String? id;
+
+  @override
+  Future<String?> build() async => id;
+}
+
 Future<ProviderContainer> _pump(
   WidgetTester tester,
   _Server server, {
   AuthNotifier Function()? auth,
+  List<Override> overrides = const [],
 }) async {
   tester.view.physicalSize = const Size(800, 1400);
   tester.view.devicePixelRatio = 1;
@@ -173,6 +203,7 @@ Future<ProviderContainer> _pump(
       apiClientProvider.overrideWithValue(_FakeApiClient(dio)),
       authNotifierProvider.overrideWith(auth ?? _CashierAuth.new),
       posStoreProvider.overrideWith((ref) => 'store-1'),
+      ...overrides,
     ],
     child: MaterialApp.router(routerConfig: router),
   ));
@@ -529,6 +560,57 @@ void main() {
 
       expect(find.byKey(const Key('returns-needs-manager')), findsOneWidget);
       expect(find.text('· No receipt to find the sale by'), findsOneWidget);
+    });
+  });
+  group('the drawer a refund comes out of', () {
+    testWidgets('a refund names the open drawer, so its report counts the cash',
+        (tester) async {
+      final server = _Server();
+      final container = await _pump(tester, server,
+          overrides: [saleTillProvider.overrideWith(() => _Drawer('till-1'))]);
+      // As the POS shell does from the moment the terminal is on.
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+      await _findSale(tester);
+      await _oneJamBack(tester);
+      await _tap(tester, find.byKey(const Key('returns-submit')));
+
+      final body =
+          server.posts('/orders/o-1/returns').single.data as Map<String, dynamic>;
+      expect(body['tillSessionId'], 'till-1');
+      expect(body['refundMethod'], 'ORIGINAL');
+    });
+
+    testWidgets('with no drawer open it names none', (tester) async {
+      final server = _Server();
+      final container = await _pump(tester, server,
+          overrides: [saleTillProvider.overrideWith(() => _Drawer(null))]);
+      // As the POS shell does from the moment the terminal is on.
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+      await _findSale(tester);
+      await _oneJamBack(tester);
+      await _tap(tester, find.byKey(const Key('returns-submit')));
+
+      final body =
+          server.posts('/orders/o-1/returns').single.data as Map<String, dynamic>;
+      expect(body.containsKey('tillSessionId'), isFalse);
+    });
+
+    testWidgets(
+        'a drawer the terminal could not read a moment ago is read again, '
+        'so the refund still names it', (tester) async {
+      final server = _Server()..openTill = ['down', 'till-7'];
+      final container = await _pump(tester, server);
+      container.read(saleTillProvider);
+      await tester.pumpAndSettle();
+      await _findSale(tester);
+      await _oneJamBack(tester);
+      await _tap(tester, find.byKey(const Key('returns-submit')));
+
+      final body =
+          server.posts('/orders/o-1/returns').single.data as Map<String, dynamic>;
+      expect(body['tillSessionId'], 'till-7');
     });
   });
 }

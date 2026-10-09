@@ -29,6 +29,16 @@ class CashScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // What the server says is open here is what the sales this terminal takes
+    // must name. The terminal read it once, when it started; this read is
+    // fresher (a reload, a retry, a till opened on another device at the
+    // counter), so it is passed on. A read that failed says nothing and is
+    // not passed on.
+    ref.listen<AsyncValue<String?>>(activeTillProvider, (_, next) {
+      if (next is AsyncData<String?> && !next.isLoading) {
+        ref.read(saleTillProvider.notifier).set(next.value);
+      }
+    });
     return ref.watch(activeTillProvider).when(
           loading: () => const LoadingView(label: 'Checking the till…'),
           // The server could not say: today's form, with the reason and a
@@ -78,8 +88,14 @@ class _OpenTillViewState extends ConsumerState<_OpenTillView> {
       _opening = true;
       _error = null;
     });
+    // Read now, used when the answer comes: the cashier may have gone to
+    // another tab by then, and `ref` goes with this screen. The till is open on
+    // the server whether or not this screen is still here, so the sales that
+    // follow must name it.
+    final saleTill = ref.read(saleTillProvider.notifier);
+    final dio = ref.read(apiClientProvider).dio;
     try {
-      final resp = await ref.read(apiClientProvider).dio.post(
+      final resp = await dio.post(
         '/${ApiConstants.payment}/admin/cash/till-sessions',
         data: {
           'storeId': storeId,
@@ -91,7 +107,10 @@ class _OpenTillViewState extends ConsumerState<_OpenTillView> {
       );
       final session = resp.data['data'] as Map<String, dynamic>;
       final id = session['id'] as String?;
-      if (id != null) ref.read(activeTillProvider.notifier).opened(id);
+      if (id != null) {
+        saleTill.opened(id);
+        if (mounted) ref.read(activeTillProvider.notifier).opened(id);
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -445,13 +464,16 @@ class _OpenSessionView extends ConsumerWidget {
 
   Future<void> _closeTill(BuildContext context, WidgetRef ref, double expected,
       String currency) async {
+    // Read now, used when the answer comes (see _OpenTillViewState._open).
+    final saleTill = ref.read(saleTillProvider.notifier);
+    final dio = ref.read(apiClientProvider).dio;
     final closing = await showDialog<({double counted, String? note})>(
       context: context,
       builder: (ctx) => _CloseTillDialog(expected: expected, currency: currency),
     );
     if (closing == null) return;
     try {
-      final resp = await ref.read(apiClientProvider).dio.post(
+      final resp = await dio.post(
         '/${ApiConstants.payment}/admin/cash/till-sessions/$sessionId/close',
         data: {
           'countedCash': closing.counted,
@@ -464,8 +486,11 @@ class _OpenSessionView extends ConsumerWidget {
       // server's figure, else the same subtraction.
       final overShort =
           closed.overShort ?? (closing.counted - closed.expectedCashInTill);
-      ref.read(activeTillProvider.notifier).closed();
+      // Closed on the server: no sale may name it, whether or not this screen
+      // is still here to be told.
+      saleTill.closed();
       if (!context.mounted) return;
+      ref.read(activeTillProvider.notifier).closed();
       showDialog<void>(
         context: context,
         builder: (ctx) => AlertDialog(

@@ -658,6 +658,19 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
   /// [endPress] lets the next press start: called once this one does nothing
   /// more to the hold.
   Future<void> _completeClaimed(void Function() endPress) async {
+    // The drawer this sale is rung on is read before anything else: a read of
+    // the open till that is still in flight, or failed a moment ago, is given
+    // a few seconds first ([SaleTillNotifier.settle]) rather than the sale
+    // going out naming no drawer for the rest of the shift. Nothing is held
+    // for longer than that, and never refused: with no drawer the money is
+    // "not at a till" on the report. The notifier is kept for the refusal
+    // below, because `ref` goes with this screen.
+    final tillCtl = ref.read(saleTillProvider.notifier);
+    if (!tillCtl.settled) {
+      await tillCtl.settle();
+      if (!mounted) return;
+    }
+
     // The till as it is now: the press waited for may have changed it — a sale
     // it finished out of sight empties it.
     final settlement = ref.read(posExchangeSettlementProvider);
@@ -1111,6 +1124,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
             dio,
             {...sale.tenders[i].body, 'orderId': orderId},
             idempotencyKey: derivedId(idemBase, 'pay:$i'),
+            onTillSessionRefused: tillCtl.refused,
           );
         } catch (e) {
           // This place's own approval, recorded on this order by somebody
@@ -1684,7 +1698,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final settlement = ref.read(posExchangeSettlementProvider);
     final List<PosLine> cart = settlement?.lines ?? ref.read(posCartProvider);
     final storeId = ref.read(posStoreProvider);
-    final tillSession = ref.read(saleTillProvider).value;
+    final tillSession = ref.read(saleTillProvider).drawer;
     final customer = settlement != null ? null : ref.read(posCustomerProvider);
     final walkInPhone = ref.read(posWalkInPhoneProvider);
     final discount = _discount;
