@@ -2,6 +2,7 @@ package com.storeql.product.service;
 
 import com.storeql.ids.Ids;
 import com.storeql.product.client.Caller;
+import com.storeql.product.client.InventoryClient;
 import com.storeql.product.client.PricingClient;
 import com.storeql.product.domain.imports.CsvTable;
 import com.storeql.product.domain.imports.ImportItem;
@@ -67,6 +68,7 @@ public class ImportWorker {
   @Inject ImportRepository repo;
   @Inject ImportApplier applier;
   @Inject PricingClient pricing;
+  @Inject InventoryClient inventory;
   @Inject TenantProfiles profiles;
 
   @Inject
@@ -241,6 +243,40 @@ public class ImportWorker {
             .build()
             .toString();
       }
+      case "STOCK" -> {
+        Map<String, UUID> ids = repo.variantIdsBySku(job.tenantId(), skus(items));
+        List<InventoryClient.OpenLine> lines = new ArrayList<>();
+        Map<String, String> skuOf = new HashMap<>();
+        for (ImportItem i : items) {
+          UUID id = ids.get(i.sku());
+          if (id != null && i.stockQty() != null && i.stockQty().signum() > 0) {
+            lines.add(
+                new InventoryClient.OpenLine(
+                    id.toString(), i.stockQty(), i.cost(), i.expiry(), i.lot()));
+            skuOf.put(id.toString(), i.sku());
+          }
+        }
+        // The opening belongs to the dry run, so applying it again after a failure finds its own
+        // work.
+        var opened = inventory.openStock(cx.caller(), job.dryRunOf(), job.storeId(), lines);
+        JsonArrayBuilder left = Json.createArrayBuilder();
+        opened.alreadyOpenedVariants().stream()
+            .limit(50)
+            .forEach(
+                v ->
+                    left.add(
+                        skuOf.getOrDefault(v, v)
+                            + ": stock was opened by an earlier import; left as it is"));
+        yield Json.createObjectBuilder()
+            .add("opened", opened.loaded())
+            .add("openedAgain", opened.replayed())
+            .add("alreadyOpened", opened.alreadyOpened())
+            .add("held", opened.held())
+            .add("errorCount", opened.alreadyOpened())
+            .add("errors", left)
+            .build()
+            .toString();
+      }
       default ->
           throw new ApiException(
               500, "IMPORT_PHASE_UNKNOWN", "no such phase " + chunk.phase(), List.of(), null);
@@ -278,6 +314,10 @@ public class ImportWorker {
                 "aliases",
                 "assigned",
                 "upserted",
+                "opened",
+                "openedAgain",
+                "alreadyOpened",
+                "held",
                 "errorCount")) {
           if (d.containsKey(k)) sums.merge(k, d.getInt(k), Integer::sum);
         }
@@ -301,7 +341,7 @@ public class ImportWorker {
   // ── the job's file, read once ────────────────────────────────────────────────
 
   /** A job's file read into rows, and who is acting. */
-  private record Cx(Map<Integer, ImportItem> byLine, Caller caller) {
+  record Cx(Map<Integer, ImportItem> byLine, Caller caller) {
     static Cx load(ImportRepository repo, TenantProfiles profiles, Job job) {
       byte[] bytes = repo.fileContent(job.tenantId(), job.fileId()).orElseThrow();
       var mapping = repo.findMappingById(job.tenantId(), job.mappingId()).orElseThrow();

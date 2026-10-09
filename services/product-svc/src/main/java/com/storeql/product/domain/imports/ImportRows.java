@@ -22,6 +22,9 @@ import java.util.Set;
  */
 public final class ImportRows {
 
+  /** The longest lot a row may carry (inventory-svc keeps it to the same). */
+  static final int MAX_LOT = 64;
+
   private ImportRows() {}
 
   /** Why a row was refused: a stable code and the words for the report. */
@@ -270,6 +273,11 @@ public final class ImportRows {
                 "'" + expiryText + "' is not a date as " + mapping.dateFormat()));
       }
     }
+    String lot = emptyToNull(cell(cells, bound, "lot"));
+    if (lot != null && lot.length() > MAX_LOT) {
+      why.add(new Refusal("LOT_TOO_LONG", "a lot is at most " + MAX_LOT + " characters"));
+      lot = null;
+    }
     if (stock != null && stock.signum() > 0 && cost == null) gaps.add("STOCKED_NO_COST");
 
     // category
@@ -313,6 +321,7 @@ public final class ImportRows {
             emptyToNull(cell(cells, bound, "brand")),
             stock,
             expiry,
+            lot,
             aliases),
         List.of(),
         gaps,

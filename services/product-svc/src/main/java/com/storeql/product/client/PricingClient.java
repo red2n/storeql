@@ -252,6 +252,65 @@ public class PricingClient {
     }
   }
 
+  /**
+   * The prices a list holds, by variant id (the single-unit price of each), read a page at a time.
+   *
+   * @throws ApiException 404 {@code IMPORT_PRICE_LIST_NOT_FOUND}; 503 when pricing-svc gave no
+   *     answer
+   */
+  public java.util.Map<String, java.math.BigDecimal> pricesOn(Caller caller, String priceListId) {
+    java.util.Map<String, java.math.BigDecimal> out = new java.util.HashMap<>();
+    String after = null;
+    do {
+      Answered res;
+      try {
+        var req =
+            webClient
+                .get(baseOrFail() + "/price-lists/" + priceListId + "/items")
+                .queryParam("limit", "1000");
+        if (after != null) req = req.queryParam("after", after);
+        res = answered(caller.stamp(req), null);
+      } catch (ApiException e) {
+        throw e;
+      } catch (RuntimeException e) {
+        throw noAnswer("the prices could not be read", e);
+      }
+      if (res.status() == 404) {
+        throw ApiException.notFound(
+            "IMPORT_PRICE_LIST_NOT_FOUND",
+            "price list " + priceListId + " is not one of this business's");
+      }
+      if (res.status() != 200) {
+        throw new ApiException(
+            503,
+            "PRICING_UNAVAILABLE",
+            "pricing-svc answered HTTP " + res.status(),
+            List.of(),
+            null);
+      }
+      try (JsonReader reader = Json.createReader(new StringReader(res.body()))) {
+        var root = reader.readObject();
+        for (var item : root.getJsonArray("data").getValuesAs(jakarta.json.JsonObject.class)) {
+          var min =
+              !item.containsKey("minQty") || item.isNull("minQty")
+                  ? null
+                  : item.getJsonNumber("minQty").bigDecimalValue();
+          if (min == null || min.compareTo(java.math.BigDecimal.ONE) <= 0) {
+            out.put(item.getString("variantId"), item.getJsonNumber("price").bigDecimalValue());
+          }
+        }
+        var meta = root.getJsonObject("meta");
+        after =
+            meta == null || !meta.containsKey("nextCursor") || meta.isNull("nextCursor")
+                ? null
+                : meta.getString("nextCursor");
+      } catch (RuntimeException e) {
+        throw noAnswer("the prices could not be read", e);
+      }
+    } while (after != null);
+    return out;
+  }
+
   /** The refusal pricing-svc gave, with its own code when it sent one. */
   private static ApiException refusal(Answered res, String what) {
     String code = "PRICING_REFUSED";

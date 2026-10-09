@@ -12,10 +12,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.json.Json;
 import jakarta.json.JsonArrayBuilder;
+import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import java.io.StringReader;
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -364,5 +366,139 @@ public class InventoryClient {
                   + " lines may not have been received: inventory-svc's answer could not be read;"
                   + " check the store's stock before receiving them again"));
     }
+  }
+
+  // ── opening stock (catalogue import) ─────────────────────────────────────────
+
+  /** One item's stock as a file says it. */
+  public record OpenLine(
+      String variantId, BigDecimal qty, BigDecimal unitCost, LocalDate expiry, String lot) {}
+
+  /** What inventory-svc did with an opening: the counts, and the items it left alone. */
+  public record Opened(
+      int loaded, int replayed, int alreadyOpened, int held, List<String> alreadyOpenedVariants) {
+    public Opened {
+      alreadyOpenedVariants = List.copyOf(alreadyOpenedVariants);
+    }
+  }
+
+  /** What a job opened at one store, as inventory-svc totals it. */
+  public record StoreTotals(
+      String storeId, int lines, BigDecimal qty, BigDecimal value, int uncostedLines) {}
+
+  /**
+   * Opens stock at a store for an import job: at most {@link #receiveMaxLines} items, once each.
+   * The call is idempotent by job, so a call that got no answer is simply asked again.
+   *
+   * @throws ApiException 503 {@code INVENTORY_UNAVAILABLE} when inventory-svc gave no answer; its
+   *     own refusal (a store the caller does not keep, say) with its own code
+   */
+  public Opened openStock(Caller caller, UUID jobId, UUID storeId, List<OpenLine> lines) {
+    if (lines.isEmpty()) return new Opened(0, 0, 0, 0, List.of());
+    JsonArrayBuilder arr = Json.createArrayBuilder();
+    for (OpenLine l : lines) {
+      var o = Json.createObjectBuilder().add("variantId", l.variantId()).add("qty", l.qty());
+      if (l.unitCost() != null) o.add("unitCost", l.unitCost());
+      if (l.expiry() != null) o.add("expiryDate", l.expiry().toString());
+      if (l.lot() != null) o.add("batchNo", l.lot());
+      arr.add(o);
+    }
+    String body =
+        Json.createObjectBuilder()
+            .add("jobId", jobId.toString())
+            .add("storeId", storeId.toString())
+            .add("lines", arr)
+            .build()
+            .toString();
+    String text =
+        sent(
+            caller.stamp(webClient.post(baseOrFail() + "/admin/inventory/opening-stock")),
+            body,
+            "the opening stock may not have been loaded");
+    try (JsonReader reader = Json.createReader(new StringReader(text))) {
+      JsonObject data = reader.readObject().getJsonObject("data");
+      List<String> left = new ArrayList<>();
+      int held = 0;
+      for (JsonObject line : data.getJsonArray("lines").getValuesAs(JsonObject.class)) {
+        if ("ALREADY_OPENED".equals(line.getString("outcome")))
+          left.add(line.getString("variantId"));
+        if (line.getBoolean("held", false)) held++;
+      }
+      return new Opened(
+          data.getInt("loaded"), data.getInt("replayed"), data.getInt("alreadyOpened"), held, left);
+    }
+  }
+
+  /** What a job opened, by store; empty when it opened nothing. */
+  public List<StoreTotals> openedBy(Caller caller, UUID jobId) {
+    String text =
+        sent(
+            caller.stamp(webClient.get(baseOrFail() + "/admin/inventory/opening-stock/" + jobId)),
+            null,
+            "the opening stock could not be read");
+    try (JsonReader reader = Json.createReader(new StringReader(text))) {
+      List<StoreTotals> out = new ArrayList<>();
+      for (JsonObject s :
+          reader
+              .readObject()
+              .getJsonObject("data")
+              .getJsonArray("stores")
+              .getValuesAs(JsonObject.class)) {
+        out.add(
+            new StoreTotals(
+                s.getString("storeId"),
+                s.getInt("lines"),
+                new BigDecimal(s.getString("qty")),
+                new BigDecimal(s.getString("value")),
+                s.getInt("uncostedLines")));
+      }
+      return out;
+    }
+  }
+
+  private String baseOrFail() {
+    return registry
+        .resolve(INVENTORY_SERVICE)
+        .orElseThrow(
+            () ->
+                new ApiException(
+                    503,
+                    "INVENTORY_UNAVAILABLE",
+                    "no healthy inventory-svc instance in discovery",
+                    List.of(),
+                    null))
+        .baseUri();
+  }
+
+  /** Sends a request and returns the body of a 200, or throws what the answer says. */
+  private static String sent(
+      io.helidon.webclient.api.HttpClientRequest req, String body, String what) {
+    int status;
+    String text;
+    try (HttpClientResponse res =
+        body == null
+            ? req.request()
+            : req.header(HeaderNames.CONTENT_TYPE, "application/json").submit(body)) {
+      status = res.status().code();
+      text = res.as(String.class);
+    } catch (RuntimeException e) {
+      LOG.log(System.Logger.Level.WARNING, "inventory-svc gave no answer: " + what, e);
+      throw new ApiException(503, "INVENTORY_UNAVAILABLE", what, List.of(), e);
+    }
+    if (status == 200) return text;
+    String code = "INVENTORY_REFUSED";
+    String message = what + ": inventory-svc answered HTTP " + status;
+    try (JsonReader reader = Json.createReader(new StringReader(text))) {
+      JsonObject o = reader.readObject();
+      if (o.containsKey("code")) code = o.getString("code");
+      if (o.containsKey("error") && !o.isNull("error")) {
+        JsonObject e = o.getJsonObject("error");
+        if (e.containsKey("code")) code = e.getString("code");
+        if (e.containsKey("message")) message = e.getString("message");
+      }
+    } catch (RuntimeException ignored) {
+      // The words stay generic; the status is said.
+    }
+    throw new ApiException(status >= 500 ? 503 : 409, code, message, List.of(), null);
   }
 }

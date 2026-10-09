@@ -7,7 +7,7 @@
 | **Roadmap** | new: pilot gate, importer slices P1 to P4 in the merged plan |
 | **Services** | product-svc owns the import job, its mapping, files, chunks, row results and barcode aliases · pricing-svc takes VAT categories and prices · inventory-svc takes opening stock · purchase-svc is read for supplier matching · the admin app |
 | **Builds on** | product-svc `/admin/import`, `ProductService` bulk import, `product_variants` (barcode, GTIN-14), the GS1 scan, `ProductVatCategoryResource`, `PricingClient`, inventory `receive` and `insertBatch`, the recall gate and lock order, `Entitlements`, the sandbox tenant, [vat-inclusive-pricing](vat-inclusive-pricing.md) |
-| **Built in** | (not yet built) |
+| **Built in** | product-svc V17 + `domain/imports`, `ImportService/Applier/Worker/Reconciler`, `ImportResource`; inventory-svc V36 + `OpeningStock*`; `feat/pilot-gate` (P1 to P3; the 25,000-row timing run and the app screens are P4) |
 
 ## Problem
 
@@ -67,18 +67,18 @@ The owner uploads the export once per store, maps its columns once per business,
 
 ## Acceptance
 
-- [ ] The reader handles BOM, three encodings, four delimiters, quoted newlines, a barcode in exponent form (refused) and a lost leading zero (flagged) — `CsvTableTest`.
-- [ ] The dry run writes only `import_row_results`; it reports created, updated, unchanged, skipped and refused with row numbers and reasons, and lists the go-live gaps (no barcode, no category, stocked item with no cost, food with no allergens, unknown supplier, no VAT rate configured for a mapped code) — `ImportDryRunIT`.
-- [ ] A row is refused, and nothing of it is written, for: no SKU, a conflicting repeat, a bad GTIN check digit, a barcode held by another variant or alias, an unmapped VAT code, a missing or over-precise price, a weighed item with no unit, a label-style 2xx code used as a barcode — `ImportRefusalsIT`.
-- [ ] Apply needs a dry run of the same file hash and mapping (`IMPORT_DRY_RUN_REQUIRED`), cannot run twice at once per business, expires after 24 hours, and a killed worker resumes at the first unfinished chunk with no row written twice — `ImportApplyIT`, `ImportResumeIT`.
-- [ ] Re-importing a corrected file updates in place by SKU: a blank cell never erases, an identical row is UNCHANGED, nothing is orphaned (no price or stock lost) — `ImportReimportIT`.
-- [ ] The saved mapping applies to the second store's file by header text with no re-mapping — `ImportMappingIT`.
-- [ ] VAT codes map through the batch call; an unmapped code refuses its rows; a code with no configured VAT rate is a gap and the quote refusal is predicted — `ImportVatIT`.
-- [ ] A price whose basis does not match the list's tax mode is refused (`IMPORT_PRICE_BASIS_MISMATCH`); a price is never converted — `ImportPricesIT`.
-- [ ] Opening stock lands as received batches with expiry through `insertBatch` and putaway (recall gate and holds respected), once per (store, variant) per job, and a recalled lot in the file is held — `OpeningStockIT`.
-- [ ] The reconciliation report gives file against loaded per measure (rows, SKUs, barcodes, price count and sum by VAT code, stock quantity, stock value) and names every unmatched SKU — `ImportReconcileIT`.
-- [ ] A scanned old EAN, multipack or case code finds the variant with its pack quantity; aliases are unique per business and compared as GTIN-14 — `BarcodeAliasIT`.
-- [ ] **Tenant isolation:** the same file in two businesses makes two files with no existence leak; the lock key includes the tenant; an alias is unique per business, not globally; a worker never acts outside its job's tenant; other businesses' staff of every role, even naming our job id, get 404 — `ImportIsolationIT`.
+- [x] The reader handles BOM, three encodings, four delimiters, quoted newlines, a barcode in exponent form (refused) and a lost leading zero (flagged) — `CsvTableTest`, `GtinTest`.
+- [x] The dry run writes only `import_row_results`; it reports created, updated, unchanged, skipped and refused with row numbers and reasons, and lists the go-live gaps (no barcode, no category, stocked item with no cost, food with no allergens, unknown supplier, no VAT rate configured for a mapped code) — `ImportDryRunIT`, `DryRunTest`.
+- [x] A row is refused, and nothing of it is written, for: no SKU, a conflicting repeat, a bad GTIN check digit, a barcode held by another variant or alias, an unmapped VAT code, a missing or over-precise price, a weighed item with no unit, a label-style 2xx code used as a barcode — `ImportRowsTest`, `DryRunTest`, `ImportDryRunIT`.
+- [x] Apply needs a dry run of the same file hash and mapping (`IMPORT_DRY_RUN_REQUIRED`), cannot run twice at once per business, expires after 24 hours, and a killed worker resumes at the first unfinished chunk with no row written twice — `ImportApplyIT` (needs, once-at-a-time, expiry, resume after a peer was down, refusal fails the job, chunks of 500).
+- [x] Re-importing a corrected file updates in place by SKU: a blank cell never erases, an identical row is UNCHANGED, nothing is orphaned (no price or stock lost) — `ImportApplyIT.reimport`.
+- [x] The saved mapping applies to the second store's file by header text with no re-mapping — `ImportMappingTest` (columns in another order, spelled differently; a missing header is named, never guessed).
+- [x] VAT codes map through the batch call; an unmapped code refuses its rows; a code with no configured VAT rate is a gap and the quote refusal is predicted — `ImportApplyIT.applyHappyPath`, `DryRunTest`.
+- [x] A price whose basis does not match the list's tax mode is refused (`IMPORT_PRICE_BASIS_MISMATCH`); a price is never converted — `ImportApplyIT.priceBasisMismatch`.
+- [x] Opening stock lands as received batches with expiry through `insertBatch` and putaway (recall gate and holds respected), once per (store, variant) per job, and a recalled lot in the file is held — `OpeningStockIT` (inventory-svc: batches, movement, event, putaway, recalled lot held, once per store and item), `ImportReconcileIT` (the STOCK phase and a lost answer).
+- [x] The reconciliation report gives file against loaded per measure (rows, SKUs, barcodes, price count and sum by VAT code, stock quantity, stock value) and names every unmatched SKU — `ReconciliationTest`, `ImportReconcileIT`.
+- [x] A scanned old EAN, multipack or case code finds the variant with its pack quantity; aliases are unique per business and compared as GTIN-14 — `BarcodeAliasIT`.
+- [x] **Tenant isolation:** the same file in two businesses makes two files with no existence leak; the lock key includes the tenant; an alias is unique per business, not globally; a worker never acts outside its job's tenant; other businesses' staff of every role, even naming our job id, get 404 — `ImportDryRunIT`, `ImportApplyIT.isolation`, `ImportReconcileIT.whoAndWhat/perBusiness`, `OpeningStockIT.otherBusinessCannotOpenOurStore/perBusinessAndSummary`, `BarcodeAliasIT.perBusiness/noLeak`.
 - [ ] A 12 MB, 25,000-row file imports within the agreed time on the stack and reconciles — k6 `catalogue-import-flow`.
 
 ## Screens
@@ -94,6 +94,11 @@ None in this tranche (the wizard is slice P4).
 - **Opening stock reuses the recall gate and lock order** because the lock-order change (PR #83) makes a raw insert wrong.
 - **No default VAT rate** unless the mapping names one explicitly; the importer never guesses.
 - **Cost is a batch's cost.** An unstocked item has none to hold.
+- **Opening stock is opened once per (store, item), ever** (`opening_stock_loads`, unique on tenant, store, variant). A wrong opening is corrected by an adjustment or a stock take, never by loading it again, because the other mistake doubles the shelf silently. The opening's identity is the **dry run's id**, so applying the same dry run again after a failure finds its own work (`REPLAYED`) and a corrected file's new dry run meets `ALREADY_OPENED` for those lines: left as they are, said so in the apply's report, and shown short by the reconciliation. This replaces "per job" in the first draft.
+- **The reconciliation is read again from the systems, not kept from the apply**: the file is re-read, SKUs and barcodes are looked up in the catalogue, prices are read back from the price list, stock is read from inventory-svc's totals for the dry run. Figures are exact (no rounding), prices are summed by the file's VAT code, a line with no cost is counted apart and never valued at nothing.
+- **A `lot` column** (optional, 64 characters) rides with the stock so the recall gate can hold a recalled lot at the door; a file with no lot opens batches with none.
+- **Putaway is not skipped.** Opening stock goes through `insertBatch`, so a store with a default putaway rule places it at once and a store without raises one task per batch. Go-live therefore sets a store-default putaway rule first (a checklist item with the customer's zone names).
+- **A scan finds an alias after the item's own barcode and before the typed SKU**; the answer says the kind and the units one scan stands for (`alias: {kind, packQty}`), and an alias of a delisted item finds nothing.
 
 ## Flow Tests entry
 

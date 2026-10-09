@@ -19,7 +19,7 @@ import java.util.Set;
  *
  * @param columns field → the header text that holds it. Fields: {@code sku}, {@code name}
  *     (required), {@code barcode}, {@code category}, {@code vatCode}, {@code price}, {@code cost},
- *     {@code soldBy}, {@code unit}, {@code brand}, {@code stockQty}, {@code expiry}
+ *     {@code soldBy}, {@code unit}, {@code brand}, {@code stockQty}, {@code expiry}, {@code lot}
  * @param aliasColumns further barcode columns: an old code, a multipack, a case
  * @param vatCodes the customer's VAT code → StoreQL's (upper-cased keys)
  * @param defaultVatCode the StoreQL code for a row whose VAT cell is blank, or null: never guessed
@@ -55,7 +55,8 @@ public record ImportMapping(
           "unit",
           "brand",
           "stockQty",
-          "expiry");
+          "expiry",
+          "lot");
 
   /** What an alias column's codes are. */
   public static final Set<String> ALIAS_KINDS = Set.of("OLD_EAN", "MULTIPACK", "CASE", "PLU");

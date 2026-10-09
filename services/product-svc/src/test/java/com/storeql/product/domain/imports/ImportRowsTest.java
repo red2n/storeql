@@ -235,6 +235,43 @@ class ImportRowsTest {
   }
 
   @Test
+  @DisplayName("a lot rides with the stock so a recall can find it; one too long refuses the row")
+  void lot() {
+    var base = mapping();
+    var columns = new java.util.HashMap<>(base.columns());
+    columns.put("lot", "Lot");
+    var m =
+        new ImportMapping(
+            columns,
+            base.aliasColumns(),
+            base.vatCodes(),
+            base.defaultVatCode(),
+            base.priceBasis(),
+            base.decimalMark(),
+            base.dateFormat(),
+            base.soldByValues(),
+            base.categorySeparator());
+    String head =
+        "PLU,Description,EAN,Department,VAT,Retail Price,Cost,Sold By,Unit,On Hand,Expiry,Old EAN,Lot\n";
+    CsvTable.Parsed t =
+        CsvTable.parse(
+            (head
+                    + "1,X,,,A,1.29,0.8,,,5,31/12/2026,,L-77\n"
+                    + "2,Y,,,A,1.29,0.8,,,5,,,"
+                    + "L".repeat(65)
+                    + "\n"
+                    + "3,Z,,,A,1.29,0.8,,,5,,,\n")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            100);
+
+    var rows = ImportRows.readAll(m, m.bind(t.headers()), t.rows(), t.headers().size(), 2);
+
+    assertEquals("L-77", rows.get(0).item().lot());
+    assertEquals("[LOT_TOO_LONG]", codes(rows.get(1)));
+    assertNull(rows.get(2).item().lot());
+  }
+
+  @Test
   @DisplayName(
       "a repeated SKU with the same content is a harmless repeat; with different content it is a conflict")
   void duplicateSkus() {

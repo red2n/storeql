@@ -332,6 +332,7 @@ public class ImportService {
       phases.add("PRODUCTS");
       if (vat) phases.add("VAT");
       if (prices) phases.add("PRICES");
+      if (mapping.columns().containsKey("stockQty")) phases.add("STOCK");
     }
     return repo.createApplyJob(
         dry, listId, starterJson(caller), ctx.userId(), key, lines, phases, ImportWorker.CHUNK);

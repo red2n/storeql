@@ -2702,6 +2702,13 @@ public class InventoryRepository extends BaseOutboxRepository {
   }
 
   /**
+   * As {@link #insertBatch(Connection, Batch)}, saying what held the batch on arrival, if anything.
+   */
+  String insertBatchHeld(Connection c, Batch b) throws SQLException {
+    return insertBatch(c, b, null);
+  }
+
+  /**
    * Inserts a batch and, if an open recall covers it, holds it before the transaction commits.
    * Every way stock enters a store comes through here — a delivery, a transfer, a return, a count —
    * so a recalled lot arriving the day after the recall is never on sale for a moment.

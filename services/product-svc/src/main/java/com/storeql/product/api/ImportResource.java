@@ -48,6 +48,7 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 public class ImportResource {
 
   @Inject ImportService svc;
+  @Inject com.storeql.product.service.ImportReconciler reconciler;
   @Inject TenantContext ctx;
 
   // ── mappings ─────────────────────────────────────────────────────────────
@@ -194,6 +195,49 @@ public class ImportResource {
   @Path("/{id}")
   public Response get(@PathParam("id") String id) {
     return Response.ok(ApiResponse.ok(toDto(svc.getJob(ctx, Parsing.uuid(id, "id"))))).build();
+  }
+
+  @Operation(
+      summary = "Reconcile an applied import",
+      description =
+          "Reads the file again and sets it against the catalogue, the price list and the store's"
+              + " opening stock as they are now: rows, SKUs, barcodes, prices by VAT code, stock"
+              + " quantity and value, and every SKU that did not arrive. Read-only.")
+  @APIResponse(responseCode = "200", description = "The report")
+  @APIResponse(responseCode = "409", description = "IMPORT_NOT_AN_APPLY")
+  @GET
+  @Path("/{id}/reconciliation")
+  public Response reconciliation(@PathParam("id") String id) {
+    var done = reconciler.reconcile(ctx, Parsing.uuid(id, "id"));
+    var r = done.report();
+    return Response.ok(
+            ApiResponse.ok(
+                new com.storeql.product.dto.ImportDtos.ImportReconciliationResponse(
+                    done.job().id().toString(),
+                    done.job().status(),
+                    r.reconciled(),
+                    r.measures().stream()
+                        .map(
+                            m ->
+                                new com.storeql.product.dto.ImportDtos.MeasureResponse(
+                                    m.name(), m.file(), m.loaded(), m.match()))
+                        .toList(),
+                    r.prices().stream()
+                        .map(
+                            p ->
+                                new com.storeql.product.dto.ImportDtos.PriceByVatResponse(
+                                    p.vatCode(),
+                                    p.fileCount(),
+                                    p.fileSum().toPlainString(),
+                                    p.loadedCount(),
+                                    p.loadedSum().toPlainString(),
+                                    p.match()))
+                        .toList(),
+                    r.unmatchedSkus(),
+                    r.unmatchedCount(),
+                    r.priceMismatches(),
+                    r.priceMismatchCount())))
+        .build();
   }
 
   @Operation(

@@ -24,6 +24,7 @@ import java.util.List;
  * @param unit the unit of a measured item ({@code KG}, {@code L}, {@code M}…), or null
  * @param stockQty what is on the shelf, or null
  * @param expiry the last day of sale of that stock, or null
+ * @param lot the lot that stock carries, so a recall can find it, or null
  * @param aliases further codes that find the same product
  */
 public record ImportItem(
@@ -42,6 +43,7 @@ public record ImportItem(
     String brand,
     BigDecimal stockQty,
     LocalDate expiry,
+    String lot,
     List<Alias> aliases) {
 
   public ImportItem {
@@ -65,6 +67,7 @@ public record ImportItem(
         && java.util.Objects.equals(brand, o.brand)
         && compare(stockQty, o.stockQty)
         && java.util.Objects.equals(expiry, o.expiry)
+        && java.util.Objects.equals(lot, o.lot)
         && aliases.equals(o.aliases);
   }
 

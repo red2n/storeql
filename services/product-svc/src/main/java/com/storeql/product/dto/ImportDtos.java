@@ -80,4 +80,32 @@ public final class ImportDtos {
       JsonArray refusals,
       JsonArray gaps,
       JsonArray changes) {}
+
+  @Schema(
+      name = "ImportReconciliationResponse",
+      description =
+          "The file against what was loaded, measure by measure: SKUs, barcodes, aliases, prices by"
+              + " VAT code, stock lines, quantity and value, and every SKU that did not arrive.")
+  public record ImportReconciliationResponse(
+      String jobId,
+      String status,
+      @Schema(description = "Every measure agrees and every SKU arrived.") boolean reconciled,
+      List<MeasureResponse> measures,
+      List<PriceByVatResponse> prices,
+      List<String> unmatchedSkus,
+      int unmatchedCount,
+      List<String> priceMismatches,
+      int priceMismatchCount) {}
+
+  @Schema(name = "ImportMeasure")
+  public record MeasureResponse(String name, String file, String loaded, boolean match) {}
+
+  @Schema(name = "ImportPriceByVat")
+  public record PriceByVatResponse(
+      String vatCode,
+      int fileCount,
+      String fileSum,
+      int loadedCount,
+      String loadedSum,
+      boolean match) {}
 }

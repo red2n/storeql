@@ -1009,7 +1009,9 @@ public class ProductService {
    *     PLU or a shelf label, which are matched exactly and carry nothing
    */
   public record ScanResult(
-      com.storeql.product.domain.Domain.VariantWithProduct found, com.storeql.gs1.Gs1Scan scan) {}
+      com.storeql.product.domain.Domain.VariantWithProduct found,
+      com.storeql.gs1.Gs1Scan scan,
+      com.storeql.product.domain.Domain.AliasHit alias) {}
 
   /**
    * Looks a scanned code up, whatever it was encoded as (07.15).
@@ -1019,12 +1021,15 @@ public class ProductService {
    * then looks up by <b>the GTIN form</b>, which is what lets a packet whose 2D code says {@code
    * 05012345678900} find the variant a shop entered as {@code 5012345678900}.
    *
-   * <p>Three lookups, in this order, because the codes a shop scans are not all GS1 codes:
+   * <p>Four lookups, in this order, because the codes a shop scans are not all GS1 codes:
    *
    * <ol>
    *   <li>the GTIN form, when the reading produced one;
    *   <li>the barcode column exactly — which is how an internal code, a PLU and a shelf label have
    *       always worked, and must go on working;
+   *   <li>a code the business keeps as an alias of an item (an old EAN, a multipack, a case — see
+   *       the catalogue import), read as a GTIN-14 and answered with the kind and the units one
+   *       scan stands for;
    *   <li>the SKU, which a cashier types from under a label the till cannot read — as written, else
    *       in any case when only one variant answers to it.
    * </ol>
@@ -1042,10 +1047,15 @@ public class ProductService {
         reading == null || reading.gtin() == null
             ? java.util.Optional.<com.storeql.product.domain.Domain.VariantWithProduct>empty()
             : repo.findVariantByGtin(tenantId, reading.gtin());
-    // Then the barcode as entered, then a SKU a cashier typed because the label would not scan.
+    // Then the barcode as entered, then a code the business keeps as an alias of an item (an old
+    // EAN, a multipack, a case), then a SKU a cashier typed because the label would not scan.
+    var own = byGtin.or(() -> repo.findVariantByBarcode(tenantId, scanned.trim()));
+    var aliasHit =
+        own.isPresent()
+            ? java.util.Optional.<com.storeql.product.domain.Domain.AliasHit>empty()
+            : aliasGtin14(reading, scanned).flatMap(g -> repo.findVariantByAlias(tenantId, g));
     var found =
-        byGtin
-            .or(() -> repo.findVariantByBarcode(tenantId, scanned.trim()))
+        own.or(() -> aliasHit.map(com.storeql.product.domain.Domain.AliasHit::found))
             .or(() -> repo.findVariantBySku(tenantId, scanned.trim()));
     // A code that read as GS1 but matches nothing names the GTIN in the refusal, not the raw
     // string:
@@ -1061,7 +1071,20 @@ public class ProductService {
                         ? "No active variant carries GTIN " + reading.gtin()
                         : "No active variant found for barcode or SKU: " + scanned.trim()));
     requireOnSale(variant);
-    return new ScanResult(variant, reading);
+    return new ScanResult(variant, reading, aliasHit.orElse(null));
+  }
+
+  /**
+   * The GTIN-14 a scan stands for, as aliases are kept: what the 2D code carried, else the digits.
+   */
+  private static java.util.Optional<String> aliasGtin14(
+      com.storeql.gs1.Gs1Scan reading, String scanned) {
+    if (reading != null && reading.gtin() != null) {
+      return java.util.Optional.of(reading.gtin());
+    }
+    return com.storeql.product.domain.imports.Gtin.read(scanned)
+        .filter(com.storeql.product.domain.imports.Gtin.Read::ok)
+        .map(com.storeql.product.domain.imports.Gtin.Read::gtin14);
   }
 
   /**

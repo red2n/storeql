@@ -889,6 +889,48 @@ public class ProductRepository extends BaseOutboxRepository {
   }
 
   /**
+   * Looks a variant up by a code the business keeps as an alias (an old EAN, a multipack, a case, a
+   * PLU), already in the one GTIN-14 form every alias is compared in. The variant must be on sale
+   * like any other scan; an alias of a delisted variant finds nothing.
+   */
+  public Optional<com.storeql.product.domain.Domain.AliasHit> findVariantByAlias(
+      UUID tenantId, String gtin14) {
+    var aliases =
+        query(
+            "SELECT variant_id, kind, pack_qty FROM variant_barcode_aliases"
+                + " WHERE tenant_id = ? AND gtin14 = ?",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setString(2, gtin14);
+            },
+            rs ->
+                new Object[] {
+                  rs.getObject("variant_id", UUID.class),
+                  rs.getString("kind"),
+                  rs.getInt("pack_qty")
+                },
+            "find barcode alias");
+    if (aliases.isEmpty()) return Optional.empty();
+    Object[] hit = aliases.get(0);
+    return query(
+            VARIANT_WITH_PRODUCT
+                + " WHERE v.tenant_id = ? AND v.id = ?"
+                + " AND v.status = 'ACTIVE' AND p.status <> 'DELISTED'",
+            ps -> {
+              ps.setObject(1, tenantId);
+              ps.setObject(2, hit[0]);
+            },
+            ProductRepository::mapVariantWithProduct,
+            "find variant of barcode alias")
+        .stream()
+        .findFirst()
+        .map(
+            found ->
+                new com.storeql.product.domain.Domain.AliasHit(
+                    found, (String) hit[1], (Integer) hit[2]));
+  }
+
+  /**
    * Resolves a batch of variant ids to their variant + parent product in one query. Unlike the
    * storefront barcode lookup this does NOT filter on {@code status='ACTIVE'} — admin screens need
    * to resolve names/SKUs for every variant they show, including inactive ones. tenant_id is
