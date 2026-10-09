@@ -56,6 +56,10 @@ CREATE TABLE markdowns (
     cancelled_at   TIMESTAMPTZ,
     cancelled_by   UUID,
     cancel_reason  TEXT,
+    -- The tax mode of the list the sticker was cut from: original_price and markdown_price mean the
+    -- same thing they meant there, so a sticker on a tax-inclusive shelf is a shelf price.
+    tax_mode       TEXT          NOT NULL DEFAULT 'EXCLUSIVE',
+    CONSTRAINT chk_markdown_tax_mode CHECK (tax_mode IN ('EXCLUSIVE', 'INCLUSIVE')),
     CONSTRAINT chk_markdown_qty     CHECK (qty > 0),
     CONSTRAINT chk_markdown_price   CHECK (markdown_price >= 0 AND markdown_price < original_price),
     CONSTRAINT chk_markdown_reason  CHECK (reason IN ('SHORT_DATED', 'CLEARANCE', 'DAMAGED_PACK', 'OVERSTOCK')),

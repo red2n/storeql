@@ -85,6 +85,46 @@ public final class Dtos {
       @Schema(description = "UUID of the product variant.") @NotBlank String variantId,
       @Schema(description = "Must match an existing VAT rate code.") @NotBlank String vatCode) {}
 
+  @Schema(name = "BatchUpsertProductVatCategoriesRequest")
+  public record BatchUpsertProductVatCategoriesRequest(
+      @Schema(
+              description =
+                  "The assignments: at least one and at most 500, one per variant. All of them are"
+                      + " made or none is; a bad row is named in the refusal.",
+              minItems = 1,
+              maxItems = 500)
+          @NotEmpty
+          @Size(max = 500)
+          java.util.List<@NotNull UpsertProductVatCategoryRequest> items) {}
+
+  @Schema(name = "BatchProductVatCategoriesResult")
+  public record BatchProductVatCategoriesResult(
+      @Schema(description = "How many variants were assigned.") int assigned) {}
+
+  @Schema(
+      name = "VatReadinessResponse",
+      description =
+          "What stands between a business and tax-inclusive pricing: priced variants with no VAT"
+              + " category, and categories with no rate.")
+  public record VatReadinessResponse(
+      @Schema(description = "EXCLUSIVE, INCLUSIVE, or absent when the business has no active list.")
+          String taxMode,
+      @Schema(description = "How many priced variants have no VAT category, across all pages.")
+          int variantsWithoutCategory,
+      @Schema(description = "VAT codes variants are assigned to for which no rate is set.")
+          java.util.List<String> codesWithoutRate,
+      @Schema(description = "A page of the priced variants with no category, by variant id.")
+          java.util.List<VatGapResponse> gaps,
+      @Schema(description = "True when nothing stands in the way.") boolean ready) {}
+
+  @Schema(name = "VatGapResponse")
+  public record VatGapResponse(
+      UUID variantId,
+      @Schema(description = "A price list that prices it.") String priceListName,
+      String taxMode,
+      @Schema(description = "Its lowest price on an active list, in that list's mode.")
+          BigDecimal price) {}
+
   @Schema(name = "ProductVatCategoryResponse")
   public record ProductVatCategoryResponse(
       UUID id,
@@ -159,7 +199,14 @@ public final class Dtos {
               description =
                   "A price zone this list is bound to (03.x): it then prices that zone's stores"
                       + " and no other. Omitted, the list is tenant-wide.")
-          String zoneId) {}
+          String zoneId,
+      @Schema(
+              description =
+                  "EXCLUSIVE (the default): prices are net and VAT is added. INCLUSIVE: prices are"
+                      + " the shelf price, VAT included, and the VAT in them is derived. Chosen"
+                      + " here and never changed; every active list of a business shares one"
+                      + " mode.")
+          String taxMode) {}
 
   @Schema(name = "PriceListResponse")
   public record PriceListResponse(
@@ -172,7 +219,9 @@ public final class Dtos {
       String effectiveTo,
       boolean active,
       String createdAt,
-      UUID zoneId) {}
+      UUID zoneId,
+      @Schema(description = "EXCLUSIVE or INCLUSIVE: what the prices on this list mean.")
+          String taxMode) {}
 
   @Schema(name = "UpsertPriceListItemRequest")
   public record UpsertPriceListItemRequest(
@@ -312,7 +361,12 @@ public final class Dtos {
                       + " art.6a binds, its prior price is known and above today's.")
           boolean reductionAnnounceable,
       @Schema(description = "The price in the display currency asked for; absent when none was.")
-          DisplayPriceResponse display) {}
+          DisplayPriceResponse display,
+      @Schema(
+              description =
+                  "Whether the price comes from a tax-inclusive list: totalWithVat is then exactly"
+                      + " the shelf price, vatAmount the VAT inside it and unitPrice what is left.")
+          boolean taxInclusive) {}
 
   @Schema(
       name = "AppliedPriceResponse",
@@ -584,7 +638,14 @@ public final class Dtos {
               description =
                   "The unit price of what this line charges per one, discounts and VAT in; null"
                       + " when the variant's measure is not declared (03.13).")
-          UnitPriceResponse unitPricing) {}
+          UnitPriceResponse unitPricing,
+      @Schema(
+              description =
+                  "What the customer pays for the line, VAT included, after every discount. On a"
+                      + " tax-inclusive basket unitPrice, lineTotal and discount are shelf amounts"
+                      + " (VAT inside) and netTotal is what is left once the VAT in lineGross is"
+                      + " taken out.")
+          BigDecimal lineGross) {}
 
   @Schema(name = "AppliedPromotionResponse", description = "One promotion that took money off.")
   public record AppliedPromotionResponse(
@@ -618,7 +679,23 @@ public final class Dtos {
                       + " typed a code is owed an answer.")
           Map<String, String> rejectedCoupons,
       @Schema(description = "The totals in the display currency asked for; absent when none was.")
-          DisplayBasketResponse display) {}
+          DisplayBasketResponse display,
+      @Schema(
+              description =
+                  "Whether the basket was priced from tax-inclusive lists: the amounts are then"
+                      + " shelf amounts, total is the sum of the lines' lineGross and no VAT is added"
+                      + " to it.")
+          boolean taxInclusive,
+      @Schema(description = "The basket's gross, net and VAT by VAT code, in the order met.")
+          List<VatRateTotalResponse> vatByRate) {}
+
+  @Schema(name = "VatRateTotalResponse", description = "A basket's money at one VAT code.")
+  public record VatRateTotalResponse(
+      String vatCode,
+      @Schema(description = "The rate as a fraction: 0.20 for 20%; 0 when exempt.") BigDecimal rate,
+      @Schema(description = "What was paid at this rate, VAT included.") BigDecimal gross,
+      BigDecimal net,
+      BigDecimal vat) {}
 
   @Schema(
       name = "RecordRedemptionsRequest",

@@ -252,7 +252,8 @@ class MarkdownServiceTest {
             null,
             null,
             null,
-            BigDecimal.ZERO);
+            BigDecimal.ZERO,
+            "EXCLUSIVE");
     active = List.of(existing);
 
     MarkdownService.Plan plan = svc.plan(ctx("MANAGER"), STORE, 7);

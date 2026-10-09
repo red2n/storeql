@@ -108,6 +108,12 @@ CREATE TABLE price_lists (
     active         BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     zone_id        UUID,       -- NULL = the tenant-wide list every store falls back to
+    -- What the numbers on this list mean (intent/vat-inclusive-pricing.md). EXCLUSIVE: a price is net
+    -- and VAT is added. INCLUSIVE: a price is the shelf price, VAT included, and the VAT in it is
+    -- derived. Chosen when the list is made and never changed; every active list of a business
+    -- shares one mode.
+    tax_mode       TEXT        NOT NULL DEFAULT 'EXCLUSIVE',
+    CONSTRAINT chk_price_lists_tax_mode CHECK (tax_mode IN ('EXCLUSIVE', 'INCLUSIVE')),
     CONSTRAINT uq_price_lists_tenant_name UNIQUE (tenant_id, name),
     CONSTRAINT fk_price_lists_zone_id FOREIGN KEY (zone_id) REFERENCES price_zones (id)
 );

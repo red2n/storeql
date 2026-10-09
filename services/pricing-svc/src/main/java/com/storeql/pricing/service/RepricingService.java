@@ -429,6 +429,16 @@ public class RepricingService {
                 () ->
                     ApiException.conflict(
                         "REPRICING_NO_PRICE_LIST", "the proposal's price list no longer exists"));
+    // A shelf price's VAT is the rate of the variant's category (intent/vat-inclusive-pricing.md):
+    // a proposal is no way round the refusal a person typing the same price would meet.
+    if (list.taxInclusive()
+        && pricing.findProductVatCategory(ctx.tenantId(), p.variantId()).isEmpty()) {
+      throw ApiException.conflict(
+          "PRICING_VAT_CATEGORY_REQUIRED",
+          "variant "
+              + p.variantId()
+              + " has no VAT category; give it one before a tax-inclusive price is applied to it");
+    }
     PriceListItem item =
         new PriceListItem(
             Ids.newId(),

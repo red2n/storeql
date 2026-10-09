@@ -24,6 +24,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -180,34 +181,78 @@ public class PricingRepository extends BaseOutboxRepository {
    * @return the assignment as stored
    */
   public ProductVatCategory upsertProductVatCategory(ProductVatCategory pvc) {
-    return inTx(
+    return inTx(c -> upsertProductVatCategoryTx(c, pvc), "upsert product vat category");
+  }
+
+  /**
+   * Assigns many variants to VAT codes on one transaction: all of them or none.
+   *
+   * @param rows the assignments, at most one per variant
+   */
+  public void upsertProductVatCategories(List<ProductVatCategory> rows) {
+    inTx(
         c -> {
-          try (var ps =
-              c.prepareStatement(
-                  "INSERT INTO product_vat_categories"
-                      + " (id,tenant_id,variant_id,vat_code,effective_from)"
-                      + " VALUES (?,?,?,?,?)"
-                      + " ON CONFLICT (tenant_id,variant_id)"
-                      + " DO UPDATE SET vat_code=EXCLUDED.vat_code,"
-                      + "  effective_from=EXCLUDED.effective_from,"
-                      + "  effective_to=NULL"
-                      + " RETURNING (xmax = 0) AS inserted")) {
-            ps.setObject(1, pvc.id());
-            ps.setObject(2, pvc.tenantId());
-            ps.setObject(3, pvc.variantId());
-            ps.setString(4, pvc.vatCode());
-            ps.setObject(5, toOdt(pvc.effectiveFrom()));
-            boolean inserted;
-            try (var rs = ps.executeQuery()) {
-              inserted = rs.next() && rs.getBoolean("inserted");
-            }
-            // A category replaced in place cannot be read as of before (03.12); a new one can.
-            com.storeql.pricing.repo.AppliedPriceRepository.enqueue(
-                c, pvc.tenantId(), pvc.variantId(), null, "VAT_CATEGORY_SET", !inserted);
+          for (ProductVatCategory pvc : rows) {
+            upsertProductVatCategoryTx(c, pvc);
           }
-          return pvc;
+          return rows.size();
         },
-        "upsert product vat category");
+        "upsert product vat categories");
+  }
+
+  private static ProductVatCategory upsertProductVatCategoryTx(Connection c, ProductVatCategory pvc)
+      throws SQLException {
+    try (var ps =
+        c.prepareStatement(
+            "INSERT INTO product_vat_categories"
+                + " (id,tenant_id,variant_id,vat_code,effective_from)"
+                + " VALUES (?,?,?,?,?)"
+                + " ON CONFLICT (tenant_id,variant_id)"
+                + " DO UPDATE SET vat_code=EXCLUDED.vat_code,"
+                + "  effective_from=EXCLUDED.effective_from,"
+                + "  effective_to=NULL"
+                + " RETURNING (xmax = 0) AS inserted")) {
+      ps.setObject(1, pvc.id());
+      ps.setObject(2, pvc.tenantId());
+      ps.setObject(3, pvc.variantId());
+      ps.setString(4, pvc.vatCode());
+      ps.setObject(5, toOdt(pvc.effectiveFrom()));
+      boolean inserted = false;
+      try (var rs = ps.executeQuery()) {
+        if (rs.next()) {
+          inserted = rs.getBoolean("inserted");
+        }
+      }
+      // A category replaced in place cannot be read as of before (03.12); a new one can.
+      com.storeql.pricing.repo.AppliedPriceRepository.enqueue(
+          c, pvc.tenantId(), pvc.variantId(), null, "VAT_CATEGORY_SET", !inserted);
+    }
+    return pvc;
+  }
+
+  /**
+   * The VAT codes variants are assigned to for which the business has set no rate: every quote of
+   * such a variant is refused until the rate exists.
+   */
+  public List<String> findVatCodesWithoutRate(UUID tenantId) {
+    return query(
+        "SELECT DISTINCT pvc.vat_code FROM product_vat_categories pvc"
+            + " WHERE pvc.tenant_id = ?"
+            + " AND NOT EXISTS (SELECT 1 FROM vat_rates vr"
+            + "   WHERE vr.tenant_id = pvc.tenant_id AND vr.code = pvc.vat_code)"
+            + " ORDER BY pvc.vat_code",
+        ps -> ps.setObject(1, tenantId),
+        rs -> rs.getString(1),
+        "find VAT codes without a rate");
+  }
+
+  /** The tax modes of the business's active price lists: none, one, or (never) both. */
+  public List<String> findActiveTaxModes(UUID tenantId) {
+    return query(
+        "SELECT DISTINCT tax_mode FROM price_lists WHERE tenant_id=? AND active ORDER BY tax_mode",
+        ps -> ps.setObject(1, tenantId),
+        rs -> rs.getString(1),
+        "find active tax modes");
   }
 
   /**
@@ -343,12 +388,15 @@ public class PricingRepository extends BaseOutboxRepository {
   public PriceList createPriceList(PriceList pl) {
     return inTx(
         c -> {
+          if (pl.active()) {
+            requireTaxModeAllowedTx(c, pl.tenantId(), pl.taxMode());
+          }
           try (var ps =
               c.prepareStatement(
                   "INSERT INTO price_lists"
                       + " (id,tenant_id,name,channel,currency,effective_from,effective_to,active,"
-                      + " zone_id)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?)")) {
+                      + " zone_id,tax_mode)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?)")) {
             ps.setObject(1, pl.id());
             ps.setObject(2, pl.tenantId());
             ps.setString(3, pl.name());
@@ -358,6 +406,7 @@ public class PricingRepository extends BaseOutboxRepository {
             ps.setObject(7, toOdt(pl.effectiveTo()));
             ps.setBoolean(8, pl.active());
             ps.setObject(9, pl.zoneId());
+            ps.setString(10, pl.taxMode());
             ps.executeUpdate();
           } catch (SQLException sqle) {
             if (UNIQUE_VIOLATION.equals(sqle.getSQLState()))
@@ -394,7 +443,7 @@ public class PricingRepository extends BaseOutboxRepository {
     StringBuilder sql =
         new StringBuilder(
             "SELECT id,tenant_id,name,channel,currency,effective_from,effective_to,active,"
-                + "created_at,zone_id FROM price_lists WHERE tenant_id=?");
+                + "created_at,zone_id,tax_mode FROM price_lists WHERE tenant_id=?");
     if (afterCreatedAt != null && afterId != null) sql.append(" AND (created_at, id) > (?, ?)");
     sql.append(" ORDER BY created_at, id LIMIT ?");
     return query(
@@ -423,7 +472,7 @@ public class PricingRepository extends BaseOutboxRepository {
     var list =
         query(
             "SELECT id,tenant_id,name,channel,currency,effective_from,effective_to,active,created_at,"
-                + " zone_id FROM price_lists WHERE tenant_id=? AND id=?",
+                + " zone_id,tax_mode FROM price_lists WHERE tenant_id=? AND id=?",
             ps -> {
               ps.setObject(1, tenantId);
               ps.setObject(2, id);
@@ -445,7 +494,152 @@ public class PricingRepository extends BaseOutboxRepository {
         effTo != null ? effTo.toInstant() : null,
         rs.getBoolean("active"),
         rs.getObject("created_at", OffsetDateTime.class).toInstant(),
-        rs.getObject("zone_id", UUID.class));
+        rs.getObject("zone_id", UUID.class),
+        rs.getString("tax_mode"));
+  }
+
+  // ── Tax mode of the price lists (intent/vat-inclusive-pricing.md) ─────────
+
+  /**
+   * Takes the business's tax-mode lock, so two lists made or switched on at once cannot leave it
+   * with both a net and a tax-inclusive list active. Held to the end of the transaction.
+   */
+  private static void requireListModeAllowedTx(Connection c, UUID tenantId, UUID listId)
+      throws SQLException {
+    String mode = null;
+    boolean active = false;
+    try (var ps =
+        c.prepareStatement("SELECT tax_mode, active FROM price_lists WHERE tenant_id=? AND id=?")) {
+      ps.setObject(1, tenantId);
+      ps.setObject(2, listId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          mode = rs.getString(1);
+          active = rs.getBoolean(2);
+        }
+      }
+    }
+    if (mode != null && !active) {
+      requireTaxModeAllowedTx(c, tenantId, mode);
+    }
+  }
+
+  private static void lockTaxModeTx(Connection c, UUID tenantId) throws SQLException {
+    try (var ps = c.prepareStatement("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))")) {
+      ps.setString(1, "price-list-tax-mode:" + tenantId);
+      ps.execute();
+    }
+  }
+
+  /**
+   * Refuses a list in {@code mode} unless the business's active lists already use it, or it has
+   * none. The first tax-inclusive list is refused while a promotion worded in money is running: its
+   * amounts were meant as net and would silently become shelf amounts.
+   *
+   * @throws ApiException 409 {@code PRICING_TAX_MODE_MIXED} or {@code
+   *     PRICING_PROMOTIONS_IN_OTHER_MODE}
+   */
+  private static void requireTaxModeAllowedTx(Connection c, UUID tenantId, String mode)
+      throws SQLException {
+    lockTaxModeTx(c, tenantId);
+    List<String> active = new ArrayList<>();
+    try (var ps =
+        c.prepareStatement(
+            "SELECT DISTINCT tax_mode FROM price_lists WHERE tenant_id=? AND active ORDER BY"
+                + " tax_mode")) {
+      ps.setObject(1, tenantId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) active.add(rs.getString(1));
+      }
+    }
+    if (!active.isEmpty() && !(active.size() == 1 && active.get(0).equals(mode))) {
+      throw ApiException.conflict(
+          "PRICING_TAX_MODE_MIXED",
+          "this business's active price lists are "
+              + String.join(" and ", active)
+              + "; a list that is "
+              + mode
+              + " cannot be active beside them — a business prices either with VAT inside its"
+              + " shelf prices or with VAT added, not both");
+    }
+    if (active.isEmpty() && Domain.PriceList.TAX_INCLUSIVE.equals(mode)) {
+      List<String> names = new ArrayList<>();
+      try (var ps =
+          c.prepareStatement(
+              "SELECT name FROM promotions WHERE tenant_id=? AND active"
+                  + " AND (ends_at IS NULL OR ends_at > now())"
+                  + " AND (type IN ('"
+                  + Domain.Promotion.TYPE_FLAT
+                  + "','"
+                  + Domain.Promotion.TYPE_BASKET_FLAT
+                  + "','"
+                  + Domain.Promotion.TYPE_SPEND_THRESHOLD
+                  + "','"
+                  + Domain.Promotion.TYPE_MIX_MATCH
+                  + "') OR min_order_amount IS NOT NULL)"
+                  + " ORDER BY name LIMIT 5")) {
+        ps.setObject(1, tenantId);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) names.add(rs.getString(1));
+        }
+      }
+      if (!names.isEmpty()) {
+        throw ApiException.conflict(
+            "PRICING_PROMOTIONS_IN_OTHER_MODE",
+            "these promotions are worded in money that was meant as net and would become shelf"
+                + " amounts: "
+                + String.join(", ", names)
+                + "; end them (or re-make them as shelf amounts) before the first tax-inclusive"
+                + " price list");
+      }
+    }
+  }
+
+  /**
+   * Whether the business has a price for the variant on an active list whose VAT has to be known.
+   * Priced variants with no VAT category: the readiness list for a tax-inclusive start.
+   *
+   * @param after the last variant of the previous page, or {@code null}
+   * @param limit rows wanted, one more than a page to detect a next one
+   */
+  public List<Domain.VatGap> findVatGaps(UUID tenantId, UUID after, int limit) {
+    return query(
+        "SELECT pli.variant_id, MIN(pl.name) AS price_list_name, MIN(pl.tax_mode) AS tax_mode,"
+            + " MIN(pli.price) AS price"
+            + " FROM price_list_items pli"
+            + " JOIN price_lists pl ON pl.tenant_id = pli.tenant_id AND pl.id = pli.price_list_id"
+            + " WHERE pli.tenant_id = ? AND pl.active"
+            + " AND NOT EXISTS (SELECT 1 FROM product_vat_categories pvc"
+            + "   WHERE pvc.tenant_id = pli.tenant_id AND pvc.variant_id = pli.variant_id)"
+            + (after == null ? "" : " AND pli.variant_id > ?")
+            + " GROUP BY pli.variant_id ORDER BY pli.variant_id LIMIT ?",
+        ps -> {
+          int i = 1;
+          ps.setObject(i++, tenantId);
+          if (after != null) ps.setObject(i++, after);
+          ps.setInt(i, limit);
+        },
+        rs ->
+            new Domain.VatGap(
+                rs.getObject("variant_id", UUID.class),
+                rs.getString("price_list_name"),
+                rs.getString("tax_mode"),
+                rs.getBigDecimal("price")),
+        "find priced variants with no VAT category");
+  }
+
+  /** How many priced variants have no VAT category: the size of the readiness list. */
+  public int countVatGaps(UUID tenantId) {
+    return query(
+            "SELECT COUNT(DISTINCT pli.variant_id) FROM price_list_items pli"
+                + " JOIN price_lists pl ON pl.tenant_id = pli.tenant_id AND pl.id = pli.price_list_id"
+                + " WHERE pli.tenant_id = ? AND pl.active"
+                + " AND NOT EXISTS (SELECT 1 FROM product_vat_categories pvc"
+                + "   WHERE pvc.tenant_id = pli.tenant_id AND pvc.variant_id = pli.variant_id)",
+            ps -> ps.setObject(1, tenantId),
+            rs -> rs.getInt(1),
+            "count priced variants with no VAT category")
+        .get(0);
   }
 
   // ── Price List Items ──────────────────────────────────────────────────────
@@ -834,6 +1028,9 @@ public class PricingRepository extends BaseOutboxRepository {
     }
     return inTx(
         c -> {
+          if (change.active() && "price_lists".equals(table)) {
+            requireListModeAllowedTx(c, change.tenantId(), change.subjectId());
+          }
           int rows;
           try (var ps =
               c.prepareStatement(
@@ -1616,7 +1813,7 @@ public class PricingRepository extends BaseOutboxRepository {
 
   private static final String MD_COLUMNS =
       "m.id, m.tenant_id, m.store_id, m.variant_id, m.batch_id, m.batch_no, m.expiry_date, m.qty,"
-          + " m.currency, m.original_price, m.markdown_price, m.percent_off, m.reason,"
+          + " m.currency, m.original_price, m.markdown_price, m.percent_off, m.reason, m.tax_mode,"
           + " m.label_code, m.status, m.applied_by, m.created_at, m.cancelled_at,"
           + " m.cancelled_by, m.cancel_reason,"
           + " COALESCE((SELECT SUM(r.qty) FROM markdown_redemptions r"
@@ -1727,8 +1924,8 @@ public class PricingRepository extends BaseOutboxRepository {
               c.prepareStatement(
                   "INSERT INTO markdowns (id, tenant_id, store_id, variant_id, batch_id, batch_no,"
                       + " expiry_date, qty, currency, original_price, markdown_price, percent_off,"
-                      + " reason, label_code, status, applied_by)"
-                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                      + " reason, label_code, status, applied_by, tax_mode)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
             ins.setObject(1, draft.id());
             ins.setObject(2, draft.tenantId());
             ins.setObject(3, draft.storeId());
@@ -1745,6 +1942,7 @@ public class PricingRepository extends BaseOutboxRepository {
             ins.setString(14, label);
             ins.setString(15, Domain.Markdown.STATUS_ACTIVE);
             ins.setObject(16, draft.appliedBy());
+            ins.setString(17, draft.taxMode());
             ins.executeUpdate();
           } catch (SQLException sqle) {
             if (UNIQUE_VIOLATION.equals(sqle.getSQLState())) {
@@ -1925,7 +2123,8 @@ public class PricingRepository extends BaseOutboxRepository {
         cancelled == null ? null : cancelled.toInstant(),
         rs.getObject("cancelled_by", UUID.class),
         rs.getString("cancel_reason"),
-        rs.getBigDecimal("redeemed_qty"));
+        rs.getBigDecimal("redeemed_qty"),
+        rs.getString("tax_mode"));
   }
 
   // ── the catalogue projection (03.8) ──────────────────────────────────────
