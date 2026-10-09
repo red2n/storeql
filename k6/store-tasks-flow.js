@@ -75,7 +75,11 @@ export default function ({ shop, mumbai, rival }) {
   truthy('[+] an opening checklist is written, with its lines in order', opening && opening.checklist === true && opening.lines.length === 3 && opening.lines[1].position === 2, opening);
   const bins = data(post(`${ADMIN}/lists`, { title: 'Empty the bins', kind: 'DAILY', dueTime: '23:58' }));
   truthy('[+] a task without lines is a single thing to do, not a checklist', bins && bins.checklist === false, bins);
-  const notToday = ((new Date().getUTCDay() + 6) % 7 + 1) % 7 + 1;
+  // A weekday that is nobody's today: three days past the UTC date. The stores in this suite are
+  // in London (UTC+0/+1) and Mumbai (UTC+5:30), whose own date is at most a day ahead of UTC's, so
+  // "tomorrow in UTC" fell due in Mumbai every night between 00:00 and 05:30 IST and the count was
+  // 3, not 2.
+  const notToday = ((new Date().getUTCDay() + 6) % 7 + 3) % 7 + 1;
   const weekly = data(post(`${ADMIN}/lists`, { title: 'Sweep the yard', kind: 'WEEKLY', daysOfWeek: [notToday], dueTime: '17:00' }));
   truthy('[+] a weekly list names its day', weekly && weekly.daysOfWeek.join() === String(notToday), weekly);
   const adHoc = data(post(`${ADMIN}/lists`, { title: 'Put the delivery away', kind: 'AD_HOC', dueTime: '15:00' }));

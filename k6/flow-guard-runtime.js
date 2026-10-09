@@ -16,10 +16,12 @@ import {
   errorCode,
   expect,
   login,
+  must,
   onboardTenant,
   platformAdmin,
   poll,
   priceVariants,
+  receive,
   register,
   sellableVariant,
   setStoreStatus,
@@ -47,6 +49,10 @@ export function setup() {
   for (const t of Object.values(tenants)) {
     t.variantId = sellableVariant(t, 'Guarded tea').variantId;
     priceVariants(t, [t.variantId]);
+    // Stock at every store: where checkout holds are enforced (the production default) an online
+    // order for a variant with none is refused ORDER_INSUFFICIENT_STOCK, and these guards place
+    // several. Harmless where holds are off.
+    for (const s of t.stores) must(receive(t, s.id, t.variantId, 50), [200, 201], 'stock for the guarded tea');
     t.customer = register(`${t.label}-shopper`);
   }
   // Staff who never sells or opens a till: their cart is not checked out by an order, and their
