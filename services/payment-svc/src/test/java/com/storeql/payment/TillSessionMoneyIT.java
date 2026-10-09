@@ -902,4 +902,53 @@ class TillSessionMoneyIT {
     eq("the day's cash", z, "expectedCash", "255.00");
     eq("counted as expected", z, "overShort", "0.00");
   }
+
+  // ── the description a client is built from ────────────────────────────────
+
+  private static String responseText(JsonObject doc, String path, String verb, String status) {
+    JsonObject responses =
+        doc.getJsonObject("paths")
+            .getJsonObject(path)
+            .getJsonObject(verb)
+            .getJsonObject("responses");
+    assertThat(path + " " + verb + " answers " + status, responses.containsKey(status), is(true));
+    return responses.getJsonObject(status).getString("description");
+  }
+
+  @Test
+  @DisplayName("the OpenAPI description lists the till-session refusals a client has to answer")
+  void theOpenApiDescriptionListsTheTillSessionRefusals() {
+    var r = target.path("/openapi").request(jakarta.ws.rs.core.MediaType.APPLICATION_JSON).get();
+    assertThat(r.getStatus(), is(200));
+    JsonObject doc =
+        jakarta.json.Json.createReader(new java.io.StringReader(r.readEntity(String.class)))
+            .readObject();
+
+    String tender404 = responseText(doc, "/payments", "post", "404");
+    String tender409 = responseText(doc, "/payments", "post", "409");
+    assertThat(tender404, org.hamcrest.Matchers.containsString("TILL_SESSION_NOT_FOUND"));
+    assertThat(tender409, org.hamcrest.Matchers.containsString("TILL_SESSION_NOT_OPEN"));
+    assertThat(tender409, org.hamcrest.Matchers.containsString("TILL_SESSION_OTHER_STORE"));
+
+    String refund = "/payments/by-order/{orderId}/refunds";
+    assertThat(
+        responseText(doc, refund, "post", "404"),
+        org.hamcrest.Matchers.containsString("TILL_SESSION_NOT_FOUND"));
+    assertThat(
+        responseText(doc, refund, "post", "409"),
+        org.hamcrest.Matchers.containsString("TILL_SESSION_NOT_OPEN"));
+    assertThat(
+        responseText(doc, refund, "post", "409"),
+        org.hamcrest.Matchers.containsString("TILL_SESSION_OTHER_STORE"));
+
+    assertThat(
+        responseText(doc, "/admin/cash/till-sessions", "post", "400"),
+        org.hamcrest.Matchers.containsString("TILL_BASIS_INVALID"));
+    assertThat(
+        responseText(doc, "/admin/cash/movements", "post", "400"),
+        org.hamcrest.Matchers.containsString("TILL_CLOSED"));
+    assertThat(
+        responseText(doc, "/payments/terminal/refund-dues/{id}/another-way", "post", "409"),
+        org.hamcrest.Matchers.containsString("TILL_SESSION_NOT_OPEN"));
+  }
 }
