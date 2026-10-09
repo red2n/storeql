@@ -945,8 +945,9 @@ public final class Events {
               .add("qty", item.qty());
       // A line from before conditions existed has none; the consumer reads its absence as sellable.
       if (item.condition() != null) line.add("condition", item.condition());
-      // What was refunded for the line, VAT included (additive): the VAT return reads it.
-      if (item.refundAmount() != null) line.add("amount", item.refundAmount());
+      // What was refunded for the line before VAT (additive; the return keeps its lines net, the
+      // total above is what the customer got back): the VAT return reads the two together.
+      if (item.refundAmount() != null) line.add("netAmount", item.refundAmount());
       // At shelf prices the VAT inside what is refunded for the line (additive: older consumers
       // ignore it).
       if (item.taxAmount() != null) {

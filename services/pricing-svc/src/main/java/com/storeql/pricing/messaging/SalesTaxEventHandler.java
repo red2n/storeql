@@ -3,6 +3,7 @@ package com.storeql.pricing.messaging;
 import com.storeql.ids.Ids;
 import com.storeql.pricing.domain.Domain.TaxTransaction;
 import com.storeql.pricing.repo.PricingRepository;
+import com.storeql.service.Fx;
 import com.storeql.service.TenantProfiles;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -55,8 +56,8 @@ public class SalesTaxEventHandler {
   /** A line whose code the event did not carry. */
   static final String UNCODED = "UNCODED";
 
-  /** A return line with no VAT figure of its own, estimated from the sale's line. */
-  static final String PRO_RATA = "VAT-PRORATA";
+  /** A return line whose VAT was worked out from the return's total, not carried by the line. */
+  static final String DERIVED = "VAT-DERIVED";
 
   @Inject PricingRepository repo;
   @Inject TenantProfiles profiles;
@@ -144,38 +145,55 @@ public class SalesTaxEventHandler {
     UUID orderId = Ids.parse(text(o, "orderId"));
     UUID storeId = Ids.parse(text(o, "storeId"));
     Instant taxPoint = taxPoint(tenantId, storeId, o);
+    JsonArray items = o.getJsonArray("items");
+    if (items == null || items.isEmpty()) return 0;
+
+    // A return line is kept net; the event's total is what the customer got back. Each line's gross
+    // is its net plus the VAT inside it: the VAT the line carries (shelf prices), else what the
+    // total leaves once the nets are taken out, shared over the lines by their nets.
+    BigDecimal[] net = new BigDecimal[items.size()];
+    BigDecimal[] vat = new BigDecimal[items.size()];
+    boolean everyLineTaxed = true;
+    BigDecimal sumNet = BigDecimal.ZERO;
+    for (int i = 0; i < items.size(); i++) {
+      JsonObject item = items.getJsonObject(i);
+      net[i] = number(item, "netAmount");
+      if (net[i] == null) {
+        LOG.log(
+            Level.WARNING,
+            "Return {0} line {1} carries no amount: not in the VAT return",
+            text(o, "returnId"),
+            i);
+        return 0;
+      }
+      vat[i] = number(item, "vatAmount");
+      everyLineTaxed &= vat[i] != null;
+      sumNet = sumNet.add(net[i]);
+    }
+    boolean derived = !everyLineTaxed;
+    if (derived) {
+      BigDecimal total = number(o, "refundAmount");
+      if (total == null || sumNet.signum() <= 0 || total.compareTo(sumNet) < 0) {
+        LOG.log(
+            Level.WARNING,
+            "Return {0} cannot be split into net and VAT: not in the VAT return",
+            text(o, "returnId"));
+        return 0;
+      }
+      vat = share(total.subtract(sumNet), net, sumNet, Fx.minorUnits(text(o, "currency")));
+    }
+
     List<TaxTransaction> sold = repo.findTaxTransactionsByOrder(tenantId, orderId);
     List<TaxTransaction> rows = new ArrayList<>();
-    JsonArray items = o.getJsonArray("items");
-    for (int i = 0; items != null && i < items.size(); i++) {
-      JsonObject item = items.getJsonObject(i);
-      BigDecimal amount = number(item, "amount");
-      if (amount == null || amount.signum() == 0) {
-        if (amount == null) {
-          LOG.log(
-              Level.WARNING,
-              "Return {0} line {1} carries no amount: not in the VAT return",
-              o.getString("returnId", "?"),
-              i);
-        }
-        continue;
-      }
-      UUID variantId = Ids.parse(text(item, "variantId"));
+    for (int i = 0; i < items.size(); i++) {
+      UUID variantId = Ids.parse(text(items.getJsonObject(i), "variantId"));
       TaxTransaction origin =
           sold.stream()
               .filter(t -> t.variantId().equals(variantId) && t.grossAmount().signum() > 0)
               .findFirst()
               .orElse(null);
-      BigDecimal vat = number(item, "vatAmount");
-      String ref = null;
-      if (vat == null) {
-        if (origin == null || origin.grossAmount().signum() == 0) continue;
-        vat =
-            amount
-                .multiply(origin.vatAmount())
-                .divide(origin.grossAmount(), 4, RoundingMode.HALF_UP);
-        ref = PRO_RATA;
-      }
+      BigDecimal gross = net[i].add(vat[i]);
+      if (gross.signum() == 0) continue;
       rows.add(
           row(
               Ids.derived(eventId, "ret:" + i),
@@ -186,12 +204,29 @@ public class SalesTaxEventHandler {
               storeId,
               origin == null ? UNCODED : origin.vatCode(),
               origin == null ? null : origin.vatRate(),
-              amount.negate(),
-              vat.negate(),
+              gross.negate(),
+              vat[i].negate(),
               taxPoint,
-              ref));
+              derived ? DERIVED : null));
     }
     return repo.appendTaxTransactions(rows);
+  }
+
+  /**
+   * {@code amount} shared over lines by their weights to the currency's minor unit; the last takes
+   * the rest.
+   */
+  static BigDecimal[] share(BigDecimal amount, BigDecimal[] weights, BigDecimal sum, int places) {
+    BigDecimal[] out = new BigDecimal[weights.length];
+    BigDecimal given = BigDecimal.ZERO;
+    for (int i = 0; i < weights.length; i++) {
+      out[i] =
+          i == weights.length - 1
+              ? amount.subtract(given)
+              : amount.multiply(weights[i]).divide(sum, places, RoundingMode.HALF_UP);
+      given = given.add(out[i]);
+    }
+    return out;
   }
 
   private int noReceipt(JsonObject o) {

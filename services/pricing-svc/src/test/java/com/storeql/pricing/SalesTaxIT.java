@@ -119,7 +119,7 @@ class SalesTaxIT {
         + "]}";
   }
 
-  private static String returned(String[] b, String order, String at, String items) {
+  private static String returned(String[] b, String order, String at, String total, String items) {
     return "{\"eventId\":\""
         + Ids.newId()
         + "\",\"eventType\":\"OrderReturned\",\"occurredAt\":\""
@@ -132,7 +132,9 @@ class SalesTaxIT {
         + Ids.newId()
         + "\",\"storeId\":\""
         + b[1]
-        + "\",\"items\":["
+        + "\",\"currency\":\"GBP\",\"refundAmount\":"
+        + total
+        + ",\"items\":["
         + items
         + "]}";
   }
@@ -267,7 +269,10 @@ class SalesTaxIT {
                 b,
                 order,
                 "2026-06-16T09:00:00Z",
-                "{\"variantId\":\"" + BREAD + "\",\"qty\":1,\"amount\":1.29,\"vatAmount\":0.22}"));
+                "1.29",
+                "{\"variantId\":\""
+                    + BREAD
+                    + "\",\"qty\":1,\"netAmount\":1.07,\"vatAmount\":0.22}"));
 
     assertThat(n, is(1));
     JsonObject r = june(b[0]);
@@ -283,8 +288,8 @@ class SalesTaxIT {
 
   @Test
   @DisplayName(
-      "a return with no VAT figure of its own is estimated from the sale's line, and says so")
-  void aReturnWithNoVatFigureIsEstimated() {
+      "a return line with no VAT of its own is split from the return's total: net 1.90 of 1.99 leaves 0.09")
+  void aReturnWithNoVatFigureIsDerived() {
     String[] b = biz();
     String order = Ids.newId().toString();
     feed(confirmed(Ids.newId().toString(), b, order, JUNE, shelfBasket()));
@@ -294,15 +299,43 @@ class SalesTaxIT {
             b,
             order,
             "2026-06-16T09:00:00Z",
-            "{\"variantId\":\"" + JAM + "\",\"qty\":1,\"amount\":1.99}"));
+            "1.99",
+            "{\"variantId\":\"" + JAM + "\",\"qty\":1,\"netAmount\":1.90}"));
 
-    box(june(b[0]), "box1", "0.22");
+    JsonObject r = june(b[0]);
+    box(r, "box1", "0.22");
+    box(r, "box6", "3.56");
     assertThat(
         count(
-            "SELECT invoice_ref FROM pricing.tax_transactions WHERE order_id = '"
+            "SELECT invoice_ref || ':' || vat_code FROM pricing.tax_transactions WHERE order_id = '"
                 + order
                 + "' AND gross_amount < 0"),
-        is("VAT-PRORATA"));
+        is("VAT-DERIVED:T5"));
+  }
+
+  @Test
+  @DisplayName("a two-line return's VAT is shared over its lines to the penny, whatever the split")
+  void theSplitAddsUp() {
+    String[] b = biz();
+    String order = Ids.newId().toString();
+    feed(confirmed(Ids.newId().toString(), b, order, JUNE, shelfBasket()));
+
+    // 3.28 refunded for the loaf and the jam: nets 1.07 and 1.90 leave 0.31 to share
+    feed(
+        returned(
+            b,
+            order,
+            "2026-06-16T09:00:00Z",
+            "3.28",
+            "{\"variantId\":\""
+                + BREAD
+                + "\",\"qty\":1,\"netAmount\":1.07},{\"variantId\":\""
+                + JAM
+                + "\",\"qty\":1,\"netAmount\":1.90}"));
+
+    JsonObject r = june(b[0]);
+    box(r, "box1", "0.00"); // 0.31 sold, 0.31 taken back, whichever way it is shared
+    box(r, "box6", "2.49");
   }
 
   @Test
@@ -344,7 +377,8 @@ class SalesTaxIT {
             b,
             order,
             "2026-06-16T09:00:00Z",
-            "{\"variantId\":\"" + BREAD + "\",\"qty\":1,\"amount\":1.29,\"vatAmount\":0.22}"));
+            "1.29",
+            "{\"variantId\":\"" + BREAD + "\",\"qty\":1,\"netAmount\":1.07,\"vatAmount\":0.22}"));
 
     int back = feed(ended("OrderVoided", b, order, "2026-06-17T09:00:00Z"));
 
