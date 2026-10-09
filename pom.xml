@@ -7,7 +7,7 @@
     <!--
       StoreQL — parent reactor POM (monorepo).
       Aggregates all modules: shared contracts, platform services, business services.
-      Build with JDK 21:  JAVA_HOME=/usr/lib/jvm/temurin-21-jdk-amd64 mvn clean install
+      Build with JDK 25 (Temurin); the jars still target release 21:  JAVA_HOME=<a JDK 25> mvn clean install
     -->
 
     <!-- Helidon application parent: gives us the Helidon dependency BOM + sane plugin config. -->

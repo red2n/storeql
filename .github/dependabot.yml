@@ -22,9 +22,15 @@ updates:
         update-types: [minor, patch]
 
   # The base images of Dockerfile.svc and Dockerfile.web: most of an image's findings live there.
+  # A new Java major is a deliberate change (the healthcheck, CI and the stack move with it, see
+  # intent/jdk-25.md), and a bot proposes non-LTS releases too, so only updates within the pinned major
+  # (new Temurin builds of 25) come from here.
   - package-ecosystem: docker
     directory: /
     schedule: { interval: weekly, day: monday }
+    ignore:
+      - dependency-name: eclipse-temurin
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: github-actions
     directory: /

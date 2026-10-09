@@ -16,11 +16,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up JDK 21
+      - name: Set up JDK 25 (the jars still target release 21)
         uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '25'
           cache: maven
 
       - name: Build and verify
@@ -97,6 +97,27 @@ jobs:
         run: |
           python3 -m pip install --quiet pyyaml
           scripts/k8s-check.sh
+
+  # The container healthcheck of every Java image (intent/jdk-25.md): the Temurin 25 JRE image has no
+  # curl, wget or nc, so a healthcheck that used one reports every service unhealthy and the stack never
+  # starts, which is what reverted the first move to 25. The script is proved against real servers on
+  # this machine and inside the 21 and 25 base images; the files are checked so that no compose
+  # healthcheck or Kubernetes probe of a Java image can use a tool the image lacks.
+  healthchecks:
+    name: Container healthchecks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check the compose healthchecks and the Kubernetes probes
+        run: |
+          python3 -m pip install --quiet pyyaml
+          scripts/compose-healthcheck-check.py --self-test
+          scripts/compose-healthcheck-check.py
+
+      - name: Prove the healthcheck script on this machine and in each base image
+        run: scripts/healthcheck-selftest.sh
 
   # ── Alerting ───────────────────────────────────────────────────────────────
   # The alert rules (promtool check and unit tests: a healthy service must not alert, a restart must)

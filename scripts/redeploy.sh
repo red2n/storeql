@@ -47,7 +47,12 @@ $PULL && PRUNE_ALL=true
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/temurin-21-jdk-amd64}"
+# The JDK that builds the jars (25; they still target release 21): the one named in JAVA_HOME, else the
+# `java` on the PATH, never a path that only one machine has.
+if [ -z "${JAVA_HOME:-}" ]; then
+  JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")"
+fi
+export JAVA_HOME
 
 cyan() { printf '\033[1;36m%s\033[0m\n' "$*"; }
 red()  { printf '\033[1;31m%s\033[0m\n' "$*"; }

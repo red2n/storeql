@@ -17,7 +17,7 @@ All paths below are relative to the repo root (`storeql/`).
 
 ## Prerequisites
 
-Docker + Docker Compose (`docker compose`, not `docker-compose`). JDK 21 and
+Docker + Docker Compose (`docker compose`, not `docker-compose`). JDK 25 and
 Maven are only needed if you're rebuilding a backend service's jar — the
 stack as shipped already has built images.
 
@@ -61,7 +61,7 @@ grep PLATFORM_ADMIN .env
 ## Build
 
 ```bash
-export JAVA_HOME=/usr/lib/jvm/temurin-21-jdk-amd64   # only if rebuilding backend jars
+export JAVA_HOME=/path/to/your/jdk-25   # only if rebuilding backend jars (or put its bin/ first on the PATH)
 mvn clean install -DskipTests                        # backend: all 14 services + gateway + config
 (cd frontends/storeql-app && flutter build web --release --no-web-resources-cdn \
     --dart-define=STOREQL_API_BASE=http://localhost:8090/api)   # web UI bundle

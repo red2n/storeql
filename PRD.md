@@ -290,7 +290,7 @@ Storekeeper → Gateway → purchase-svc.receiveGRN
 
 | Layer | Choice |
 |---|---|
-| Language / runtime | **Java 21** |
+| Language / runtime | **Java 25** (LTS; jars target release 21) |
 | Service framework | **Helidon MP 4.x** (MicroProfile: Config, Health, Metrics, OpenAPI, JWT-Auth, Fault Tolerance, Reactive Messaging) |
 | Build | **Maven** multi-module (shared parent POM) |
 | API | JAX-RS (REST), OpenAPI 3 generated per service |
@@ -313,7 +313,7 @@ Mirrors `red2n/home` (parent POM + `gateway`/`discovery`/`config` + business ser
 
 ```
 storeql/
-├── pom.xml                      # parent: Java 21, Helidon BOM, shared plugins
+├── pom.xml                      # parent: Java 25 build / release 21, Helidon BOM, shared plugins
 ├── docker-compose.yml           # postgres, kafka, zookeeper, consul, redis, zipkin, prometheus, grafana
 ├── PRD.md
 ├── README.md

@@ -2,7 +2,7 @@
 
 > **Read this first if you're building or changing code.** This is the single source of truth for *how* StoreQL is built — the concepts, the rules, the architecture, and a per-service map of what actually exists in the repo today. For *what* StoreQL does as a product (features, personas, workflows), read [README.md](../README.md) instead — it's the product deep dive and doesn't assume any of the technical background below. Companion docs: [PRD.md](../PRD.md) (what & why, roadmap), [docs/API-GUIDE.md](API-GUIDE.md) (full REST surface by business capability), [docs/UI-GUIDE.md](UI-GUIDE.md) (full UI surface by persona/screen).
 
-**StoreQL** is a **multi-tenant SaaS stock & store management platform** that also lets **customers buy products** — online (storefront) and in-store (POS) — built as **strict microservices** on **Helidon MP (Java 21)**, behind an **API gateway**, with **Consul** discovery, a **central config service**, and **Kafka** events.
+**StoreQL** is a **multi-tenant SaaS stock & store management platform** that also lets **customers buy products** — online (storefront) and in-store (POS) — built as **strict microservices** on **Helidon MP (Java 25, jars target release 21)**, behind an **API gateway**, with **Consul** discovery, a **central config service**, and **Kafka** events.
 
 ## Status
 
@@ -129,7 +129,7 @@ Dev-only tooling that rides along in `docker-compose.yml`: **kafka-ui** (browse 
 
 | Layer | Tech | Notes |
 |---|---|---|
-| Language / runtime | **Java 21**, Helidon MP 4.x | MicroProfile (CDI/JAX-RS) style, not Helidon SE |
+| Language / runtime | **Java 25** (LTS; jars target release 21), Helidon MP 4.x | MicroProfile (CDI/JAX-RS) style, not Helidon SE |
 | Build | **Maven**, multi-module reactor | one parent `pom.xml`, one module per service |
 | Database | **PostgreSQL**, one schema per service, pooled via **PgBouncer** | Flyway 10.20.1, HikariCP 6.2.1 |
 | Messaging | **Apache Kafka (KRaft mode, no ZooKeeper)** | transactional outbox pattern on every publisher |
@@ -150,7 +150,7 @@ Dev-only tooling that rides along in `docker-compose.yml`: **kafka-ui** (browse 
 
 ```
 storeql/
-├── pom.xml                      # parent: Java 21, Helidon BOM, quality plugins
+├── pom.xml                      # parent: Java 25 build / release 21, Helidon BOM, quality plugins
 ├── docker-compose.yml           # full local stack (see §15 for the port map)
 ├── docker-compose.prod.yml      # prod overlay: fail-fast secrets, no dev tooling
 ├── Dockerfile.svc / Dockerfile.web
@@ -593,7 +593,7 @@ For the full screen-by-screen, persona-by-persona tour of what's actually on eac
 - **Kafka consumers poll back to back (`KafkaEventLoop`, 1 Oct 2026):** the next poll follows the last after `storeql.kafka.poll-delay-ms` (50; the poll itself waits up to 500 ms for records) where it used to wait 2 s, and `max.poll.records` is `storeql.kafka.max-poll-records` (100), so a batch finishes well inside `max.poll.interval.ms`. A record that failed still holds its partition and is redelivered after 2 s, so its five attempts are not spent in a blink before it goes to `<topic>.DLT`.
 - **Caches are bounded:** a cache keyed by tenant (or store, or key) has a ceiling and an eviction, because an entry for a business nobody asks about again is otherwise a slow leak. common-service's `TenantProfiles` (its three maps), `Entitlements` and `FxRates` are trimmed by `CacheSweep` past `storeql.cache.max-tenants` (10,000) — expired entries first, then any until it fits; eviction costs only a re-read. The same rule holds service by service: the gateway's `LookupCache` (least recently used out, constant time), payment-svc's store payment methods, pricing-svc's advertising verdicts, iam-svc's breach-check ranges and its providers' OIDC discovery documents and key sets, notification-svc's parsed templates and its "no endpoint" fan-out memo. (Not built: single-flight refresh in common-service's readers, and dropping a tenant on `TenantStatusChanged`.) reporting-svc's waiting-work report is such a cache too: per business, least recently asked for evicted at `cache-max-businesses`, kept `cache-millis`, only a report in which every source answered, one reading at a time per business (a cold cache is not a herd).
 - **One Redis client per service (`RedisClientProducer`):** built once and reused for the life of the bean — a retry after Redis was unreachable reconnects through the same client instead of building another that nobody shuts down (each owns Netty threads); commands time out at 250 ms, and the producer is guarded by a `ReentrantLock`.
-- **Virtual threads: never hold a monitor across blocking work.** Helidon 4 runs every request on a virtual thread, and on Java 21 a virtual thread that blocks inside `synchronized` — network or JDBC I/O, a sleep, waiting on a future — or that waits to enter one, **pins its carrier**; there are about as many carriers as CPUs, so one slow peer behind a monitor stalls every request in the process (JEP 491 lifts this from JDK 24). So no `synchronized` around blocking work: use a `ReentrantLock` — with `tryLock` and the last good value where a stale answer will do, as `SigningKeySet` does — or do the I/O outside the lock and publish the result through a `volatile` field or an atomic (`FcmPushProvider`'s token, `MqttChannel`'s connection, `ReadBreaker`, `UuidV7Generator`). A monitor that guards memory alone (a simulated provider's list, a double-checked client build) is fine. To find pinning under load, record JFR's `jdk.VirtualThreadPinned` (or run with `-Djdk.tracePinnedThreads=short` on 21).
+- **Virtual threads: never hold a monitor across blocking work.** Helidon 4 runs every request on a virtual thread, and on Java 21 a virtual thread that blocks inside `synchronized` — network or JDBC I/O, a sleep, waiting on a future — or that waits to enter one, **pins its carrier**; there are about as many carriers as CPUs, so one slow peer behind a monitor stalls every request in the process (JEP 491 lifts this from JDK 24, so on the 25 the services run on only native frames and class initialisation still pin; the rule stays as the defence for a rollback to 21, and is relaxed only after a JFR run under k6 on 25 shows no pins and the 21 fallback is retired). So no `synchronized` around blocking work: use a `ReentrantLock` — with `tryLock` and the last good value where a stale answer will do, as `SigningKeySet` does — or do the I/O outside the lock and publish the result through a `volatile` field or an atomic (`FcmPushProvider`'s token, `MqttChannel`'s connection, `ReadBreaker`, `UuidV7Generator`). A monitor that guards memory alone (a simulated provider's list, a double-checked client build) is fine. To find pinning under load, record JFR's `jdk.VirtualThreadPinned` (`-Djdk.tracePinnedThreads` was removed in 24; it only works on 21).
 - **Migrations:** Flyway only (`V<n>__desc.sql`); never manual DDL in prod. While the product is in DEV a migration only CREATEs (see [§7](#7-anatomy-of-one-service)).
 - **Tests:** unit for `service/` logic + Testcontainers integration for the core flow. Not done without it.
 
@@ -694,11 +694,11 @@ MicroProfile Config keys the hardening round added, with the default each takes 
 
 ## 15. Local development
 
-**Prerequisites:** JDK 21 (Temurin), Maven 3.9+, Docker + Docker Compose.
+**Prerequisites:** JDK 25 (Temurin; the jars still target release 21), Maven 3.9+, Docker + Docker Compose.
 
 ```bash
 cp .env.example .env && nano .env    # set real secrets (dev defaults work out of the box too)
-export JAVA_HOME=/usr/lib/jvm/temurin-21-jdk-amd64
+export JAVA_HOME=/path/to/your/jdk-25      # or put its bin/ first on the PATH
 mvn clean install -DskipTests        # build all service JARs
 docker compose up -d --build         # infra → platform → business services → gateway, health-gated
 curl http://localhost:8090/api/inventory-svc/health/ready
