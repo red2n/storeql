@@ -1,7 +1,6 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/auth/auth_notifier.dart';
@@ -11,6 +10,7 @@ import '../../core/format.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../shared/util/file_download.dart';
+import '../../shared/util/pick_file.dart';
 import '../../shared/widgets/error_view.dart';
 import '../../shared/widgets/loading_view.dart';
 import '../../shared/widgets/status_badge.dart';
@@ -73,13 +73,8 @@ String payeeCheckText(PayeeCheck c) {
 /// A provider so widget tests hand a file in.
 final statusReportPickerProvider = Provider<Future<String?> Function()>(
   (ref) => () async {
-    final r = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: const ['xml'],
-      withData: true,
-    );
-    final bytes = r == null || r.files.isEmpty ? null : r.files.first.bytes;
-    return bytes == null ? null : utf8.decode(bytes);
+    final f = await pickFileWithBytes(const ['xml']);
+    return f == null ? null : utf8.decode(f.bytes);
   },
 );
 

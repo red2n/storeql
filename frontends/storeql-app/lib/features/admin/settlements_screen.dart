@@ -1,7 +1,6 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -18,6 +17,7 @@ import '../../shared/widgets/page_header.dart';
 import '../../shared/widgets/status_badge.dart';
 import 'package:storeql_app/core/ids.dart';
 import '../../shared/widgets/empty_state.dart';
+import '../../shared/util/pick_file.dart';
 import '../../shared/util/short_ref.dart';
 import 'providers/admin_providers.dart';
 import 'widgets/figure_field.dart';
@@ -787,11 +787,11 @@ class _ImportSettlementDialogState extends ConsumerState<ImportSettlementDialog>
   }
 
   Future<void> _pick() async {
-    final r = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['csv', 'txt'], withData: true);
-    if (r == null || r.files.isEmpty || r.files.first.bytes == null) return;
+    final f = await pickFileWithBytes(const ['csv', 'txt']);
+    if (f == null) return;
     setState(() {
-      _fileName = r.files.first.name;
-      _content = utf8.decode(r.files.first.bytes!, allowMalformed: true);
+      _fileName = f.name;
+      _content = utf8.decode(f.bytes, allowMalformed: true);
       _error = null;
     });
   }

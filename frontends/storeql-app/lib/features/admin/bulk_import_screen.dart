@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'package:dio/dio.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
@@ -8,6 +7,7 @@ import '../../core/network/api_client.dart';
 import '../../core/network/api_error.dart';
 import '../../core/spacing.dart';
 import '../../core/theme.dart';
+import '../../shared/util/pick_file.dart';
 import 'providers/admin_providers.dart';
 
 // ── Supplier Catalogue CSV import ─────────────────────────────────────────────
@@ -153,15 +153,9 @@ class _BulkImportScreenState extends ConsumerState<BulkImportScreen> {
   // ── File pick ────────────────────────────────────────────────────────────────
 
   Future<void> _pickFile() async {
-    final r = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['csv'],
-      withData: true,
-    );
-    if (r == null || r.files.isEmpty) return;
-    final f = r.files.first;
-    if (f.bytes == null) return;
-    final csv = utf8.decode(f.bytes!);
+    final f = await pickFileWithBytes(const ['csv']);
+    if (f == null) return;
+    final csv = utf8.decode(f.bytes);
     setState(() {
       _fileName = f.name;
       _csvContent = csv;
