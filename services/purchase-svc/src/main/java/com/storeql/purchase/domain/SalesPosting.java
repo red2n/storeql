@@ -155,6 +155,41 @@ public final class SalesPosting {
       boolean confirmed,
       LocalDate date,
       BigDecimal revenueRefunded) {
+    return refund(
+        tenantId,
+        orderId,
+        storeId,
+        allocations,
+        saleTotal,
+        saleTax,
+        currency,
+        confirmed,
+        date,
+        revenueRefunded,
+        null);
+  }
+
+  /**
+   * As above, with the VAT inside the refund as the sale carried it (a sale at shelf prices): VAT
+   * output is debited by exactly that, never by the sale's blended ratio, which splits a basket of
+   * mixed rates wrongly and lets the parts of a refund drift off the sale's VAT. Capped by what the
+   * refund takes of the sale and by the VAT the sale holds. Null: the sale's own ratio, as for a
+   * sale priced net.
+   *
+   * @param carriedVat the VAT inside the refunded amount, or null
+   */
+  public static List<NominalLedgerEntry> refund(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      List<Allocation> allocations,
+      BigDecimal saleTotal,
+      BigDecimal saleTax,
+      String currency,
+      boolean confirmed,
+      LocalDate date,
+      BigDecimal revenueRefunded,
+      BigDecimal carriedVat) {
     Map<Control, BigDecimal> byControl = new LinkedHashMap<>();
     BigDecimal refunded = BigDecimal.ZERO;
     for (Allocation a : allocations) {
@@ -179,10 +214,12 @@ public final class SalesPosting {
       // One rounding, straight to the sale currency's minor units (a working scale first would
       // round twice).
       BigDecimal vat =
-          ofSale
-              .multiply(tax)
-              .divide(saleTotal, Money.scaleOf(currency), RoundingMode.HALF_UP)
-              .min(ofSale);
+          carriedVat != null
+              ? carriedVat.max(BigDecimal.ZERO).min(ofSale).min(tax)
+              : ofSale
+                  .multiply(tax)
+                  .divide(saleTotal, Money.scaleOf(currency), RoundingMode.HALF_UP)
+                  .min(ofSale);
       p.debit(Domain.CODE_SALES, Domain.NAME_SALES, ofSale.subtract(vat))
           .debit(Domain.CODE_VAT_OUTPUT, Domain.NAME_VAT_OUTPUT, vat)
           .debit(Domain.CODE_SALES_CLEARING, Domain.NAME_SALES_CLEARING, refunded.subtract(ofSale));

@@ -55,6 +55,7 @@ class OrderEventHandler {
     BigDecimal requestedAmount; // null => cancellation: refund all remaining captured
     String reason;
     String kind = null;
+    BigDecimal adjustmentVat = null;
     PaymentService.ReturnRefund returnRefund = null;
     try (var reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
@@ -87,6 +88,10 @@ class OrderEventHandler {
                     : null,
                 obj.containsKey("currency") && !obj.isNull("currency")
                     ? obj.getString("currency")
+                    : null,
+                // The VAT inside the return's value, when the sale carried it.
+                obj.containsKey("vatAmount") && !obj.isNull("vatAmount")
+                    ? obj.getJsonNumber("vatAmount").bigDecimalValue()
                     : null);
         requestedAmount = obj.getJsonNumber("refundAmount").bigDecimalValue();
         reason = "Return refund";
@@ -111,6 +116,11 @@ class OrderEventHandler {
         reason =
             "OrderLineShortClosed".equals(eventType) ? "Line closed short" : "Line substituted";
         kind = ADJUSTMENT_KIND;
+        // The VAT inside what goes back, when the order was sold at shelf prices.
+        adjustmentVat =
+            obj.containsKey("vatAmount") && !obj.isNull("vatAmount")
+                ? obj.getJsonNumber("vatAmount").bigDecimalValue()
+                : null;
       } else {
         return; // not a refund-triggering event
       }
@@ -138,7 +148,7 @@ class OrderEventHandler {
       return;
     }
     service.refundForOrderEvent(
-        eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason, kind);
+        eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason, kind, adjustmentVat);
   }
 
   private static PaymentService.ExchangeReturn exchangeOf(JsonObject obj) {
@@ -163,7 +173,10 @@ class OrderEventHandler {
         obj.containsKey("customerId") && !obj.isNull("customerId")
             ? Ids.parse(obj.getString("customerId"))
             : null,
-        obj.containsKey("currency") && !obj.isNull("currency") ? obj.getString("currency") : null);
+        obj.containsKey("currency") && !obj.isNull("currency") ? obj.getString("currency") : null,
+        obj.containsKey("vatAmount") && !obj.isNull("vatAmount")
+            ? obj.getJsonNumber("vatAmount").bigDecimalValue()
+            : null);
   }
 
   /**

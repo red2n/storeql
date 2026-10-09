@@ -30,6 +30,7 @@ class OrderEventHandlerTest {
     UUID tenantId;
     UUID orderId;
     BigDecimal amount;
+    BigDecimal vatAmount;
     String reason;
     String kind;
     ReturnRefund ret;
@@ -76,7 +77,8 @@ class OrderEventHandlerTest {
         BigDecimal requestedAmount,
         String reason,
         ReturnRefund ret) {
-      refundForOrderEvent(eventId, consumer, tenantId, orderId, requestedAmount, reason, null);
+      refundForOrderEvent(
+          eventId, consumer, tenantId, orderId, requestedAmount, reason, null, null);
       this.ret = ret;
     }
 
@@ -88,7 +90,9 @@ class OrderEventHandlerTest {
         UUID orderId,
         BigDecimal requestedAmount,
         String reason,
-        String kind) {
+        String kind,
+        BigDecimal vatAmount) {
+      this.vatAmount = vatAmount;
       this.calls++;
       this.eventId = eventId;
       this.consumer = consumer;
@@ -373,6 +377,21 @@ class OrderEventHandlerTest {
     handler.handle(lineEvent("OrderLineSubstituted", "0.00"));
     handler.handle(lineEvent("OrderLineShortClosed", "0"));
     assertEquals(2, service.calls, "nothing to give back, nothing refunded");
+  }
+
+  @Test
+  void aLineClosedShortCarriesTheVatInsideWhatGoesBack() {
+    String event = lineEvent("OrderLineShortClosed", "12.00");
+    handler.handle(event.substring(0, event.length() - 1) + ",\"vatAmount\":2.00}");
+
+    assertEquals(new BigDecimal("2.00"), service.vatAmount);
+  }
+
+  @Test
+  void aLineClosedShortOnANetOrderCarriesNone() {
+    handler.handle(lineEvent("OrderLineShortClosed", "12.00"));
+
+    assertEquals(null, service.vatAmount);
   }
 
   // ── container deposit refunds (09.16) ──────────────────────────────

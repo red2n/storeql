@@ -72,6 +72,21 @@ public class SalesPostingService {
       UUID orderId,
       UUID storeId,
       List<SalesPosting.Allocation> shares) {
+    return postRefund(eventId, tenantId, orderId, storeId, shares, null);
+  }
+
+  /**
+   * As above, with the VAT inside the refund when the sale carried it (a sale at shelf prices).
+   *
+   * @param carriedVat the VAT inside the refunded amount, or null to split it in the sale's ratio
+   */
+  public boolean postRefund(
+      UUID eventId,
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      List<SalesPosting.Allocation> shares,
+      BigDecimal carriedVat) {
     Optional<SalesOrder> sale = repo.findSale(tenantId, orderId);
     UUID store =
         storeId != null
@@ -89,7 +104,8 @@ public class SalesPostingService {
             sale.map(SalesOrder::currency).orElse(null),
             sale.isPresent(),
             today(),
-            sale.isPresent() ? repo.revenueRefunded(tenantId, orderId) : null);
+            sale.isPresent() ? repo.revenueRefunded(tenantId, orderId) : null,
+            carriedVat);
     return repo.recordRefundOnce(eventId, REFUND_CONSUMER, posting);
   }
 

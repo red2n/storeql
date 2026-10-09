@@ -627,6 +627,22 @@ public class PaymentService {
       BigDecimal requestedAmount,
       String reason,
       String kind) {
+    refundForOrderEvent(eventId, consumer, tenantId, orderId, requestedAmount, reason, kind, null);
+  }
+
+  /**
+   * As above, with the VAT inside the refunded amount when the order carried it (a line closed
+   * short or substituted on a sale at shelf prices); null for an order priced net.
+   */
+  public void refundForOrderEvent(
+      UUID eventId,
+      String consumer,
+      UUID tenantId,
+      UUID orderId,
+      BigDecimal requestedAmount,
+      String reason,
+      String kind,
+      BigDecimal vatAmount) {
     UUID refundBatchId = Ids.newId();
     repo.refundOrderOnce(
         eventId,
@@ -638,7 +654,18 @@ public class PaymentService {
         null,
         new CardSettlement.OwedBack(eventId, kind, null, null, null),
         (amt, shares) ->
-            Events.paymentRefunded(tenantId, refundBatchId, orderId, amt, shares, kind));
+            Events.paymentRefunded(
+                tenantId,
+                refundBatchId,
+                orderId,
+                amt,
+                shares,
+                kind,
+                null,
+                null,
+                null,
+                null,
+                vatRefunded(vatAmount, amt, requestedAmount, null)));
     putBackOnCards(tenantId, orderId);
   }
 
@@ -716,7 +743,20 @@ public class PaymentService {
    * What an {@code OrderReturned} says about where the money goes; {@code customerId} may be null,
    * and {@code currency} is the sale's, so store credit is credited in it rather than guessed.
    */
-  public record ReturnRefund(String method, UUID returnId, UUID customerId, String currency) {
+  public record ReturnRefund(
+      String method,
+      UUID returnId,
+      UUID customerId,
+      String currency,
+      /**
+       * The VAT inside the return's value as the sale carried it (a sale at shelf prices); null for
+       * a sale priced net, whose refund the ledger splits in the sale's own ratio.
+       */
+      BigDecimal vatAmount) {
+    public ReturnRefund(String method, UUID returnId, UUID customerId, String currency) {
+      this(method, returnId, customerId, currency, null);
+    }
+
     public ReturnRefund(String method, UUID returnId, UUID customerId) {
       this(method, returnId, customerId, null);
     }
@@ -762,8 +802,27 @@ public class PaymentService {
                 ret.method(),
                 ret.returnId(),
                 ret.customerId(),
-                ret.currency()));
+                ret.currency(),
+                vatRefunded(ret.vatAmount(), amt, requestedAmount, ret.currency())));
     putBackOnCards(tenantId, orderId);
+  }
+
+  /**
+   * The VAT inside what was actually refunded: the return's carried VAT in full when all of it was
+   * refunded, in proportion when the captured tenders could cover only part, never more than the
+   * refund itself. Null when the return carried none.
+   */
+  static BigDecimal vatRefunded(
+      BigDecimal carried, BigDecimal refunded, BigDecimal requested, String currency) {
+    if (carried == null || refunded == null || requested == null || requested.signum() <= 0) {
+      return null;
+    }
+    if (refunded.compareTo(requested) >= 0) return carried.min(refunded);
+    int units = currency == null ? carried.scale() : com.storeql.service.Fx.minorUnits(currency);
+    return carried
+        .multiply(refunded)
+        .divide(requested, units, java.math.RoundingMode.HALF_UP)
+        .min(refunded);
   }
 
   /** The tender an exchange leaves on the new order: what the returned goods pay towards it. */
@@ -817,7 +876,42 @@ public class PaymentService {
       BigDecimal refundAmount,
       UUID returnId,
       UUID customerId,
-      String currency) {}
+      String currency,
+      /** The VAT inside the whole return, when the sale carried it; null otherwise. */
+      BigDecimal vatAmount) {
+
+    public ExchangeReturn(
+        UUID exchangeOrderId,
+        UUID storeId,
+        BigDecimal exchangeAmount,
+        BigDecimal refundAmount,
+        UUID returnId,
+        UUID customerId,
+        String currency) {
+      this(
+          exchangeOrderId,
+          storeId,
+          exchangeAmount,
+          refundAmount,
+          returnId,
+          customerId,
+          currency,
+          null);
+    }
+
+    /**
+     * The part of the return's VAT that sits in what the new sale takes (the exchange), or null.
+     */
+    BigDecimal exchangeVat() {
+      if (vatAmount == null || refundAmount.signum() <= 0) return null;
+      int units =
+          currency == null ? vatAmount.scale() : com.storeql.service.Fx.minorUnits(currency);
+      return vatAmount
+          .multiply(exchangeAmount)
+          .divide(refundAmount, units, java.math.RoundingMode.HALF_UP)
+          .min(vatAmount);
+    }
+  }
 
   /**
    * An exchange, once per event, on one transaction: the returned value (capped at what the
@@ -852,7 +946,8 @@ public class PaymentService {
                     METHOD_EXCHANGE,
                     ex.returnId(),
                     ex.customerId(),
-                    ex.currency()),
+                    ex.currency(),
+                    vatRefunded(ex.exchangeVat(), amt, ex.exchangeAmount(), ex.currency())),
             (amt, shares) ->
                 Events.paymentRefunded(
                     tenantId,
@@ -864,7 +959,11 @@ public class PaymentService {
                     "ORIGINAL",
                     ex.returnId(),
                     ex.customerId(),
-                    ex.currency()),
+                    ex.currency(),
+                    ex.vatAmount() == null
+                        ? null
+                        : vatRefunded(
+                            ex.vatAmount().subtract(ex.exchangeVat()), amt, extra, ex.currency())),
             amt ->
                 Events.paymentCaptured(
                     tenantId, tenderId, ex.exchangeOrderId(), amt, METHOD_EXCHANGE, ex.storeId()),

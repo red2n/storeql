@@ -162,6 +162,7 @@ public class StorefrontResource {
         s.type(),
         !Store.TYPE_DARK_STORE.equals(s.type()),
         tenant.businessName(),
-        s.tillPhone());
+        s.tillPhone(),
+        tenant.vatNumber());
   }
 }

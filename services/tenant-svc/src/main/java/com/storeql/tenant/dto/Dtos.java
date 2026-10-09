@@ -332,7 +332,12 @@ public final class Dtos {
                   "What the store's till asks for the customer's phone: REQUIRED, OPTIONAL or OFF"
                       + " (a phone at the till). The till reads it here, from the list a cashier"
                       + " may read; it names nobody.")
-          String tillPhone) {}
+          String tillPhone,
+      @Schema(
+              description =
+                  "The business's VAT identifier as it prints on a receipt, or null until it sets"
+                      + " one. Public business data: the till heads its receipts with it.")
+          String vatNumber) {}
 
   @Schema(name = "ZoneResponse")
   public record ZoneResponse(
