@@ -219,6 +219,69 @@ class EventsTest {
   }
 
   @Test
+  void aVoidAtATillNamesTheDrawerAndOneWithoutLeavesItOut() {
+    UUID drawer = Ids.newId();
+    JsonObject named =
+        Json.createReader(
+                new StringReader(
+                    Events.orderVoided(TENANT, ORDER, STORE, null, List.of(), drawer).payload()))
+            .readObject();
+    assertEquals(drawer.toString(), named.getString("tillSessionId"));
+
+    JsonObject bare =
+        Json.createReader(
+                new StringReader(
+                    Events.orderVoided(TENANT, ORDER, STORE, null, List.of()).payload()))
+            .readObject();
+    assertFalse(bare.containsKey("tillSessionId"), "no drawer named, none claimed");
+  }
+
+  @Test
+  void aReturnAtATillNamesTheDrawerAndOneWithoutLeavesItOut() {
+    UUID drawer = Ids.newId();
+    var line =
+        new ReturnItem(
+            Ids.newId(), TENANT, RETURN, VARIANT, BigDecimal.ONE, BigDecimal.TEN, "SEALED");
+
+    JsonObject named =
+        Json.createReader(
+                new StringReader(
+                    Events.orderReturned(
+                            TENANT,
+                            ORDER,
+                            RETURN,
+                            STORE,
+                            List.of(line),
+                            BigDecimal.TEN,
+                            "ORIGINAL",
+                            "GBP",
+                            null,
+                            null,
+                            false,
+                            null,
+                            drawer)
+                        .payload()))
+            .readObject();
+    assertEquals(drawer.toString(), named.getString("tillSessionId"));
+
+    JsonObject bare =
+        Json.createReader(
+                new StringReader(
+                    Events.orderReturned(
+                            TENANT,
+                            ORDER,
+                            RETURN,
+                            STORE,
+                            List.of(line),
+                            BigDecimal.TEN,
+                            "ORIGINAL",
+                            "GBP")
+                        .payload()))
+            .readObject();
+    assertFalse(bare.containsKey("tillSessionId"));
+  }
+
+  @Test
   void aReturnsGiftCardLoadIsPaidByReturnAndNamesTheReturn() {
     var card =
         new com.storeql.order.domain.Domain.GiftCard(

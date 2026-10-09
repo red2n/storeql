@@ -128,10 +128,43 @@ public final class Domain {
       BigDecimal countedCash,
       BigDecimal overShort,
       Instant openedAt,
-      Instant closedAt) {
+      Instant closedAt,
+      String moneyBasis) {
 
     public static final String STATUS_OPEN = "OPEN";
     public static final String STATUS_CLOSED = "CLOSED";
+
+    /** Everything at the store between open and close: the basis before sessions carried money. */
+    public static final String BASIS_WINDOW = "WINDOW";
+
+    /** Only the tenders and refunds that name this session. */
+    public static final String BASIS_SESSION = "SESSION";
+
+    /** A session on the window basis, as every one was before sessions carried their money. */
+    public TillSession(
+        UUID id,
+        UUID tenantId,
+        UUID storeId,
+        UUID openedBy,
+        BigDecimal floatAmount,
+        String status,
+        BigDecimal countedCash,
+        BigDecimal overShort,
+        Instant openedAt,
+        Instant closedAt) {
+      this(
+          id,
+          tenantId,
+          storeId,
+          openedBy,
+          floatAmount,
+          status,
+          countedCash,
+          overShort,
+          openedAt,
+          closedAt,
+          BASIS_WINDOW);
+    }
   }
 
   public record CashDrop(

@@ -56,6 +56,7 @@ class OrderEventHandler {
     String reason;
     String kind = null;
     BigDecimal adjustmentVat = null;
+    UUID tillSession = null;
     PaymentService.ReturnRefund returnRefund = null;
     try (var reader = Jsons.PROVIDER.createReader(new StringReader(json))) {
       JsonObject obj = reader.readObject();
@@ -92,7 +93,8 @@ class OrderEventHandler {
                 // The VAT inside the return's value, when the sale carried it.
                 obj.containsKey("vatAmount") && !obj.isNull("vatAmount")
                     ? obj.getJsonNumber("vatAmount").bigDecimalValue()
-                    : null);
+                    : null,
+                tillSessionOf(obj));
         requestedAmount = obj.getJsonNumber("refundAmount").bigDecimalValue();
         reason = "Return refund";
       } else if ("OrderCancelled".equals(eventType)) {
@@ -103,6 +105,7 @@ class OrderEventHandler {
         // a terminal took through that terminal, as for a cancelled order.
         requestedAmount = null;
         reason = "Sale voided";
+        tillSession = tillSessionOf(obj);
       } else if ("OrderLineShortClosed".equals(eventType)
           || "OrderLineSubstituted".equals(eventType)) {
         // Substitutions for out-of-stock online lines: what the shopper paid for what they will
@@ -144,11 +147,24 @@ class OrderEventHandler {
     if ("OrderVoided".equals(eventType)) {
       // A void announced before payment-svc began refunding voids is history (V11): this group
       // meets the whole retained topic on its first read, and those were settled by hand.
-      service.refundVoidForOrderEvent(eventId, CONSUMER_NAME, tenantId, orderId);
+      service.refundVoidForOrderEvent(eventId, CONSUMER_NAME, tenantId, orderId, tillSession);
       return;
     }
     service.refundForOrderEvent(
         eventId, CONSUMER_NAME, tenantId, orderId, requestedAmount, reason, kind, adjustmentVat);
+  }
+
+  /**
+   * The till session an event says its cash was given back from, or null: attribution is a
+   * convenience to the drawer's report, so an id that is not one is dropped, not the refund.
+   */
+  private static UUID tillSessionOf(JsonObject obj) {
+    if (!obj.containsKey("tillSessionId") || obj.isNull("tillSessionId")) return null;
+    try {
+      return Ids.parse(obj.getString("tillSessionId"));
+    } catch (RuntimeException e) {
+      return null;
+    }
   }
 
   private static PaymentService.ExchangeReturn exchangeOf(JsonObject obj) {

@@ -28,9 +28,47 @@ class ActiveTillNotifier extends AsyncNotifier<String?> {
   }
 
   /// A till was just opened here.
-  void opened(String sessionId) => state = AsyncData(sessionId);
+  void opened(String sessionId) {
+    state = AsyncData(sessionId);
+    ref.read(saleTillProvider.notifier).opened(sessionId);
+  }
 
   /// The till was just closed.
+  void closed() {
+    state = const AsyncData(null);
+    ref.read(saleTillProvider.notifier).closed();
+  }
+}
+
+/// The till session this terminal's sales are counted in: the open one at its
+/// store, or null when none is (or it cannot be read).
+///
+/// Every tender, and every return, a sale sends names it, so the drawer's X
+/// report and close count exactly the money that went through it. It lives for
+/// as long as the terminal is on, is set at once by opening or closing a till on
+/// the Cash screen, and is read from payment-svc when the terminal starts or
+/// its store changes. It never stops a sale: if it cannot be read the sale goes
+/// unattributed ("not at a till" on the report), and if it has gone stale the
+/// server's refusal is answered by sending the tender again naming none
+/// ([postTender]).
+final saleTillProvider = AsyncNotifierProvider<SaleTillNotifier, String?>(
+    SaleTillNotifier.new,
+    retry: (_, _) => null);
+
+class SaleTillNotifier extends AsyncNotifier<String?> {
+  @override
+  Future<String?> build() async {
+    final storeId = ref.watch(posStoreProvider);
+    if (storeId == null) return null;
+    try {
+      return await fetchOpenTill(ref.read(apiClientProvider).dio, storeId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void opened(String sessionId) => state = AsyncData(sessionId);
+
   void closed() => state = const AsyncData(null);
 }
 
@@ -80,6 +118,11 @@ class TillReport {
   /// The closer's note on a difference; null on a live X report.
   final String? note;
 
+  /// On a drawer opened on the session basis: the net cash the store took in the
+  /// window that names no drawer (online, back-office), which is in no drawer's
+  /// expected cash. Null when there is none, or on the window basis.
+  final double? cashNotAtTill;
+
   const TillReport({
     required this.tillSessionId,
     required this.floatAmount,
@@ -95,6 +138,7 @@ class TillReport {
     this.countedCash,
     this.overShort,
     this.note,
+    this.cashNotAtTill,
   });
 
   factory TillReport.fromJson(Map<String, dynamic> j) => TillReport(
@@ -112,7 +156,16 @@ class TillReport {
         countedCash: (j['countedCash'] as num?)?.toDouble(),
         overShort: (j['overShort'] as num?)?.toDouble(),
         note: j['note'] as String?,
+        cashNotAtTill: _cashNotAtTill(j['notAtTill']),
       );
+
+  static double? _cashNotAtTill(Object? notAtTill) {
+    if (notAtTill is! Map) return null;
+    final cash = notAtTill['CASH'];
+    if (cash is! Map) return null;
+    final net = (cash['net'] as num?)?.toDouble();
+    return net == null || net == 0 ? null : net;
+  }
 }
 
 /// Live X-report for an open till session.

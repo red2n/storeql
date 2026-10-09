@@ -97,10 +97,16 @@ class TillMinorUnitsTest {
     CashManagementRepository repo = openSessionRepo();
     till("KWD", repo)
         .openTill(
-            tenant, cashier, new OpenTillRequest(store.toString(), new BigDecimal("100.125")), ctx);
+            tenant,
+            cashier,
+            new OpenTillRequest(store.toString(), new BigDecimal("100.125"), null),
+            ctx);
     till("JPY", repo)
         .openTill(
-            tenant, cashier, new OpenTillRequest(store.toString(), new BigDecimal("10000")), ctx);
+            tenant,
+            cashier,
+            new OpenTillRequest(store.toString(), new BigDecimal("10000"), null),
+            ctx);
 
     for (String[] bad :
         new String[][] {{"KWD", "100.1255"}, {"JPY", "10000.5"}, {"GBP", "1.005"}}) {
@@ -112,7 +118,7 @@ class TillMinorUnitsTest {
                   .openTill(
                       tenant,
                       cashier,
-                      new OpenTillRequest(store.toString(), new BigDecimal(bad[1])),
+                      new OpenTillRequest(store.toString(), new BigDecimal(bad[1]), null),
                       ctx));
       verify(none, never()).openTill(any());
     }
@@ -126,7 +132,7 @@ class TillMinorUnitsTest {
         .openTill(
             tenant,
             cashier,
-            new OpenTillRequest(store.toString(), new BigDecimal("100.1255")),
+            new OpenTillRequest(store.toString(), new BigDecimal("100.1255"), null),
             ctx);
     verify(repo).openTill(any());
   }

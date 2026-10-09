@@ -84,6 +84,9 @@ class _OpenTillViewState extends ConsumerState<_OpenTillView> {
         data: {
           'storeId': storeId,
           'floatAmount': double.tryParse(_floatCtrl.text.trim()) ?? 0,
+          // This drawer counts only what the sales rung on it name (two tills at
+          // one store each report their own money).
+          'basis': 'SESSION',
         },
       );
       final session = resp.data['data'] as Map<String, dynamic>;
@@ -318,6 +321,11 @@ class _OpenSessionView extends ConsumerWidget {
                                 _row('Expected cash in till',
                                     r.expectedCashInTill, currency,
                                     bold: true),
+                                // Cash the store took that names no drawer: in
+                                // none of them, shown so it is not lost.
+                                if (r.cashNotAtTill != null)
+                                  _row('Cash not at a till (in no drawer)',
+                                      r.cashNotAtTill!, currency),
                               ],
                             ),
                           ),

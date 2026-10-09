@@ -260,10 +260,10 @@ class OfflineQueueNotifier extends StateNotifier<List<OfflineSale>> {
           }
         } else if (!t.tenderDone) {
           try {
-            await dio.post(
-              '/${ApiConstants.payment}/payments',
-              data: {...t.body, 'orderId': current.orderId},
-              options: Options(headers: {'Idempotency-Key': derivedId(current.id, 'pay:$i')}),
+            await postTender(
+              dio,
+              {...t.body, 'orderId': current.orderId},
+              idempotencyKey: derivedId(current.id, 'pay:$i'),
             );
           } catch (e) {
             // The card machine's approval this tender names is already

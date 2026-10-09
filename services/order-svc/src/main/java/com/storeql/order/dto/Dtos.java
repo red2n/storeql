@@ -923,7 +923,14 @@ public final class Dtos {
                   "GIFT_CARD only: the code of this business's card to top up. Absent, a new card"
                       + " is issued for the refund.")
           @Size(max = 64)
-          String giftCardCode) {}
+          String giftCardCode,
+      @Schema(
+              description =
+                  "At a till: the till session the cash refund is paid out of, so that drawer's"
+                      + " report counts it. Used by payment-svc only when it is this business's"
+                      + " session at the sale's own store; otherwise the refund is not counted at"
+                      + " any till. A refund is never refused over it.")
+          String tillSessionId) {}
 
   @Schema(name = "ReturnItemResponse")
   public record ReturnItemResponse(
@@ -1188,7 +1195,11 @@ public final class Dtos {
       @Schema(description = "Why the sale is voided; recorded on the void log and the receipt.")
           @NotBlank
           @Size(max = 500)
-          String reason) {}
+          String reason,
+      @Schema(
+              description =
+                  "At a till: the till session the cash goes back out of; see CreateReturnRequest.")
+          String tillSessionId) {}
 
   @Schema(name = "VoidResponse")
   public record VoidResponse(String orderId, String reason, String voidedAt) {}

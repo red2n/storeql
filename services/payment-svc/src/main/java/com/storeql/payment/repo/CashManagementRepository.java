@@ -27,8 +27,8 @@ public class CashManagementRepository extends BaseOutboxRepository {
   public TillSession openTill(TillSession session) {
     exec(
         "INSERT INTO till_sessions"
-            + " (id, tenant_id, store_id, opened_by, float_amount, status, opened_at)"
-            + " VALUES (?,?,?,?,?,?,?)",
+            + " (id, tenant_id, store_id, opened_by, float_amount, status, opened_at, money_basis)"
+            + " VALUES (?,?,?,?,?,?,?,?)",
         ps -> {
           ps.setObject(1, session.id());
           ps.setObject(2, session.tenantId());
@@ -38,6 +38,7 @@ public class CashManagementRepository extends BaseOutboxRepository {
           ps.setString(6, TillSession.STATUS_OPEN);
           ps.setObject(
               7, java.time.OffsetDateTime.ofInstant(session.openedAt(), java.time.ZoneOffset.UTC));
+          ps.setString(8, session.moneyBasis());
         },
         "open till session");
     return session;
@@ -53,7 +54,7 @@ public class CashManagementRepository extends BaseOutboxRepository {
   public Optional<TillSession> findSession(UUID tenantId, UUID sessionId) {
     return query(
             "SELECT id, tenant_id, store_id, opened_by, float_amount, status,"
-                + " counted_cash, over_short, opened_at, closed_at"
+                + " counted_cash, over_short, opened_at, closed_at, money_basis"
                 + " FROM till_sessions WHERE tenant_id = ? AND id = ?",
             ps -> {
               ps.setObject(1, tenantId);
@@ -76,7 +77,7 @@ public class CashManagementRepository extends BaseOutboxRepository {
   public Optional<TillSession> findOpenSession(UUID tenantId, UUID storeId, UUID openedBy) {
     return query(
             "SELECT id, tenant_id, store_id, opened_by, float_amount, status,"
-                + " counted_cash, over_short, opened_at, closed_at"
+                + " counted_cash, over_short, opened_at, closed_at, money_basis"
                 + " FROM till_sessions"
                 + " WHERE tenant_id = ? AND store_id = ? AND status = ? AND opened_by = ?"
                 + " ORDER BY opened_at DESC, id DESC LIMIT 1",
@@ -158,6 +159,74 @@ public class CashManagementRepository extends BaseOutboxRepository {
         },
         rs -> new Object[] {rs.getString("method"), rs.getBigDecimal("total")},
         "sum tenders by method");
+  }
+
+  /**
+   * Tenders that name one till session, by method: that drawer's money, exactly, whatever else is
+   * open at the store.
+   */
+  public List<Object[]> sumTendersBySession(UUID tenantId, UUID sessionId) {
+    return query(
+        "SELECT method, COALESCE(SUM(amount),0) AS total FROM payment_tenders"
+            + " WHERE tenant_id = ? AND till_session_id = ? AND status = 'CAPTURED'"
+            + " GROUP BY method",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, sessionId);
+        },
+        rs -> new Object[] {rs.getString("method"), rs.getBigDecimal("total")},
+        "sum tenders by till session");
+  }
+
+  /** Refunds that name one till session, by method: what that drawer paid out. */
+  public List<Object[]> sumRefundsBySession(UUID tenantId, UUID sessionId) {
+    return query(
+        "SELECT method, COALESCE(SUM(amount),0) AS total FROM refund_tenders"
+            + " WHERE tenant_id = ? AND till_session_id = ? GROUP BY method",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, sessionId);
+        },
+        rs -> new Object[] {rs.getString("method"), rs.getBigDecimal("total")},
+        "sum refunds by till session");
+  }
+
+  /**
+   * Tenders at the store in a window that name no till session (online, back-office, or from a
+   * client that does not send one): shown apart as "not at a till", never in a drawer.
+   */
+  public List<Object[]> sumTendersNotAtATill(
+      UUID tenantId, UUID storeId, java.time.Instant from, java.time.Instant to) {
+    return query(
+        "SELECT method, COALESCE(SUM(amount),0) AS total FROM payment_tenders"
+            + " WHERE tenant_id = ? AND store_id = ? AND status = 'CAPTURED'"
+            + " AND till_session_id IS NULL AND created_at >= ? AND created_at < ?"
+            + " GROUP BY method",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, storeId);
+          ps.setObject(3, java.time.OffsetDateTime.ofInstant(from, java.time.ZoneOffset.UTC));
+          ps.setObject(4, java.time.OffsetDateTime.ofInstant(to, java.time.ZoneOffset.UTC));
+        },
+        rs -> new Object[] {rs.getString("method"), rs.getBigDecimal("total")},
+        "sum tenders not at a till");
+  }
+
+  /** Refunds at the store in a window that name no till session: shown apart, never in a drawer. */
+  public List<Object[]> sumRefundsNotAtATill(
+      UUID tenantId, UUID storeId, java.time.Instant from, java.time.Instant to) {
+    return query(
+        "SELECT method, COALESCE(SUM(amount),0) AS total FROM refund_tenders"
+            + " WHERE tenant_id = ? AND store_id = ? AND till_session_id IS NULL"
+            + " AND created_at >= ? AND created_at < ? GROUP BY method",
+        ps -> {
+          ps.setObject(1, tenantId);
+          ps.setObject(2, storeId);
+          ps.setObject(3, java.time.OffsetDateTime.ofInstant(from, java.time.ZoneOffset.UTC));
+          ps.setObject(4, java.time.OffsetDateTime.ofInstant(to, java.time.ZoneOffset.UTC));
+        },
+        rs -> new Object[] {rs.getString("method"), rs.getBigDecimal("total")},
+        "sum refunds not at a till");
   }
 
   /**
@@ -251,7 +320,7 @@ public class CashManagementRepository extends BaseOutboxRepository {
           try (PreparedStatement ps =
               c.prepareStatement(
                   "SELECT id, tenant_id, store_id, opened_by, float_amount, status,"
-                      + " counted_cash, over_short, opened_at, closed_at"
+                      + " counted_cash, over_short, opened_at, closed_at, money_basis"
                       + " FROM till_sessions WHERE tenant_id = ? AND id = ?")) {
             ps.setObject(1, tenantId);
             ps.setObject(2, sessionId);
@@ -276,6 +345,7 @@ public class CashManagementRepository extends BaseOutboxRepository {
         rs.getBigDecimal("counted_cash"),
         rs.getBigDecimal("over_short"),
         rs.getObject("opened_at", OffsetDateTime.class).toInstant(),
-        closedAt == null ? null : closedAt.toInstant());
+        closedAt == null ? null : closedAt.toInstant(),
+        rs.getString("money_basis"));
   }
 }

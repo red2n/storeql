@@ -3307,7 +3307,8 @@ public class OrderService {
                   order.customerId(),
                   Return.METHOD_GIFT_CARD.equals(method) ? giftCardId : null,
                   noticeId != null,
-                  approvedBy),
+                  approvedBy,
+                  tillSession(req.tillSessionId())),
               step);
     } catch (ApiException e) {
       // Two attempts with one key raced and this one lost — on the key itself, or on the quantity
@@ -4061,6 +4062,14 @@ public class OrderService {
   // ── Post-void ─────────────────────────────────────────────────────────────
 
   /**
+   * The till session a request names, or null: a UUIDv7 or {@code 400 INVALID_UUID}. Whether it is
+   * this business's, at the right store, is payment-svc's to judge when it counts the cash.
+   */
+  private static UUID tillSession(String requested) {
+    return requested == null || requested.isBlank() ? null : Ids.parse(requested);
+  }
+
+  /**
    * Voids a POS sale, restocking its lines and marking its receipt.
    *
    * <p>The receipt keeps its number and gains a reason rather than being removed: closing the hole
@@ -4103,7 +4112,12 @@ public class OrderService {
               key,
               restock ->
                   Events.orderVoided(
-                      tenantId, orderId, order.storeId(), order.customerId(), restock),
+                      tenantId,
+                      orderId,
+                      order.storeId(),
+                      order.customerId(),
+                      restock,
+                      tillSession(req.tillSessionId())),
               r -> Events.giftCardLoadReversed(r.card(), r.tx()));
     } catch (ApiException e) {
       // A retry that raced the first: it lost on the key or found the order already voided.

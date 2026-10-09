@@ -932,6 +932,76 @@ public final class Events {
       UUID approvedBy,
       UUID exchangeOrderId,
       BigDecimal exchangeAmount) {
+    return orderReturned(
+        tenantId,
+        orderId,
+        returnId,
+        storeId,
+        items,
+        refundAmount,
+        refundMethod,
+        currency,
+        customerId,
+        giftCardId,
+        recall,
+        approvedBy,
+        exchangeOrderId,
+        exchangeAmount,
+        null);
+  }
+
+  /**
+   * A return given at a till that named its session: payment-svc counts the cash it refunds in that
+   * drawer. Anything else about the event is as above.
+   */
+  static OutboxRow orderReturned(
+      UUID tenantId,
+      UUID orderId,
+      UUID returnId,
+      UUID storeId,
+      List<ReturnItem> items,
+      BigDecimal refundAmount,
+      String refundMethod,
+      String currency,
+      UUID customerId,
+      UUID giftCardId,
+      boolean recall,
+      UUID approvedBy,
+      UUID tillSessionId) {
+    return orderReturned(
+        tenantId,
+        orderId,
+        returnId,
+        storeId,
+        items,
+        refundAmount,
+        refundMethod,
+        currency,
+        customerId,
+        giftCardId,
+        recall,
+        approvedBy,
+        null,
+        null,
+        tillSessionId);
+  }
+
+  private static OutboxRow orderReturned(
+      UUID tenantId,
+      UUID orderId,
+      UUID returnId,
+      UUID storeId,
+      List<ReturnItem> items,
+      BigDecimal refundAmount,
+      String refundMethod,
+      String currency,
+      UUID customerId,
+      UUID giftCardId,
+      boolean recall,
+      UUID approvedBy,
+      UUID exchangeOrderId,
+      BigDecimal exchangeAmount,
+      UUID tillSessionId) {
     // eventId is required by inventory-svc's OrderEventHandler for per-line dedupe — without it
     // every OrderReturned is dropped as malformed and stock is never restocked. refundAmount +
     // refundMethod let payment-svc reverse the captured payment for ORIGINAL-tender returns.
@@ -975,6 +1045,7 @@ public final class Events {
     nullable(b, "customerId", customerId == null ? null : customerId.toString());
     nullable(b, "giftCardId", giftCardId == null ? null : giftCardId.toString());
     nullable(b, "approvedBy", approvedBy == null ? null : approvedBy.toString());
+    if (tillSessionId != null) b.add("tillSessionId", tillSessionId.toString());
     if (exchangeOrderId != null) {
       b.add("exchangeOrderId", exchangeOrderId.toString());
       b.add("exchangeAmount", exchangeAmount);
@@ -1056,6 +1127,17 @@ public final class Events {
       UUID storeId,
       UUID customerId,
       List<com.storeql.order.domain.Domain.RestockLine> restock) {
+    return orderVoided(tenantId, orderId, storeId, customerId, restock, null);
+  }
+
+  /** A void made at a till that named its session: the drawer the cash went back out of. */
+  static OutboxRow orderVoided(
+      UUID tenantId,
+      UUID orderId,
+      UUID storeId,
+      UUID customerId,
+      List<com.storeql.order.domain.Domain.RestockLine> restock,
+      UUID tillSessionId) {
     // SJ-D40 made a paid till sale deduct stock, so voiding one must put the stock back. items is
     // what to put back: each line net of anything already returned, or empty when the sale was
     // never handed over and nothing was deducted. eventId and storeId are what inventory-svc's
@@ -1078,6 +1160,7 @@ public final class Events {
             .add("storeId", storeId.toString())
             .add("items", lines);
     nullable(b, "customerId", customerId == null ? null : customerId.toString());
+    if (tillSessionId != null) b.add("tillSessionId", tillSessionId.toString());
     return new OutboxRow(
         "OrderVoided", "storeql.order.order-voided", tenantId, orderId, b.build().toString());
   }

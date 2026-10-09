@@ -17,7 +17,14 @@ CREATE TABLE IF NOT EXISTS till_sessions (
     -- written once, by the close that also writes counted_cash and over_short.
     closed_by       UUID,
     note            TEXT,
-    PRIMARY KEY (tenant_id, id)
+    -- Whose money the drawer's report counts. SESSION: only the tenders and refunds that name this
+    -- session, exactly, whatever else is open at the store; anything with no session is shown apart
+    -- as "not at a till". WINDOW: every tender and refund at the store between open and close, the
+    -- basis before sessions carried their money, kept for a client that does not send a session.
+    -- Fixed when the drawer is opened.
+    money_basis     VARCHAR(10)   NOT NULL DEFAULT 'WINDOW',
+    PRIMARY KEY (tenant_id, id),
+    CONSTRAINT chk_till_sessions_money_basis CHECK (money_basis IN ('WINDOW', 'SESSION'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_till_sessions_store

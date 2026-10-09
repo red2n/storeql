@@ -52,20 +52,21 @@ class RefundStoreGuardTest {
     PaymentService svc = new PaymentService();
     svc.profiles = TenantProfiles.forTest(id -> Optional.empty(), Clock.systemUTC());
     PaymentRepository repo = mock(PaymentRepository.class);
-    when(repo.createRefundGuarded(any(), any(), any())).thenAnswer(inv -> inv.getArgument(0));
+    when(repo.createRefundGuarded(any(), any(), any(), any(), any()))
+        .thenAnswer(inv -> inv.getArgument(0));
     svc.repo = repo;
 
     svc.recordRefund(
         ctx,
         order,
         new RecordRefundRequest(
-            Ids.newId().toString(), new BigDecimal("5.00"), "CASH", null, null, "damaged"),
+            Ids.newId().toString(), new BigDecimal("5.00"), "CASH", null, null, "damaged", null),
         Ids.newId().toString());
 
     ArgumentCaptor<RefundTender> refund = ArgumentCaptor.forClass(RefundTender.class);
     ArgumentCaptor<PaymentRepository.StoreGuard> guard =
         ArgumentCaptor.forClass(PaymentRepository.StoreGuard.class);
-    verify(repo).createRefundGuarded(refund.capture(), any(), guard.capture());
+    verify(repo).createRefundGuarded(refund.capture(), any(), guard.capture(), any(), any());
     return new Handed(guard.getValue(), refund.getValue());
   }
 

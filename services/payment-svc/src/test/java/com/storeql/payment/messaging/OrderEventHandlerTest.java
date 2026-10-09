@@ -34,6 +34,7 @@ class OrderEventHandlerTest {
     String reason;
     String kind;
     ReturnRefund ret;
+    UUID tillSession;
     ExchangeReturn exchange;
     UUID redemption;
     UUID giftCardOrder;
@@ -91,7 +92,9 @@ class OrderEventHandlerTest {
         BigDecimal requestedAmount,
         String reason,
         String kind,
-        BigDecimal vatAmount) {
+        BigDecimal vatAmount,
+        UUID tillSessionId) {
+      this.tillSession = tillSessionId;
       this.vatAmount = vatAmount;
       this.calls++;
       this.eventId = eventId;
@@ -271,6 +274,36 @@ class OrderEventHandlerTest {
   }
 
   @Test
+  void aVoidNamesTheDrawerTheCashLeft() {
+    UUID drawer = Ids.newId();
+
+    handler.handle(voidedEvent(EVENT, "\"tillSessionId\":\"" + drawer + "\","));
+
+    assertEquals(1, service.calls);
+    assertEquals(drawer, service.tillSession);
+  }
+
+  @Test
+  void anIdThatIsNotASessionIsDroppedNotTheRefund() {
+    handler.handle(voidedEvent(EVENT, "\"tillSessionId\":\"not-an-id\","));
+
+    assertEquals(1, service.calls, "the refund is still made");
+    assertNull(service.tillSession, "and counted at no drawer");
+  }
+
+  @Test
+  void aReturnNamesTheDrawerTheCashLeft() {
+    UUID drawer = Ids.newId();
+    String event =
+        returned("ORIGINAL", "25.00")
+            .replace("\"currency\"", "\"tillSessionId\":\"" + drawer + "\",\"currency\"");
+
+    handler.handle(event);
+
+    assertEquals(drawer, service.ret.tillSessionId());
+  }
+
+  @Test
   void aVoidAnnouncedBeforeVoidsWereRefundedIsHistory() {
     // payment-svc's consumer group had never read the voids topic, so its first deployment starts
     // at the earliest retained void: those were settled by hand when they happened, and refunding
@@ -297,6 +330,11 @@ class OrderEventHandlerTest {
   }
 
   private static String voidedEvent(UUID eventId) {
+    return voidedEvent(eventId, "");
+  }
+
+  /** {@code extra} is JSON members put before {@code items}, each ending in a comma. */
+  private static String voidedEvent(UUID eventId, String extra) {
     return "{\"eventId\":\""
         + eventId
         + "\",\"eventType\":\"OrderVoided\",\"tenantId\":\""
@@ -305,7 +343,9 @@ class OrderEventHandlerTest {
         + ORDER
         + "\",\"storeId\":\""
         + Ids.newId()
-        + "\",\"items\":[]}";
+        + "\","
+        + extra
+        + "\"items\":[]}";
   }
 
   @Test

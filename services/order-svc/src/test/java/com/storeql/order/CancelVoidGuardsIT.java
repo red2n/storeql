@@ -163,6 +163,39 @@ class CancelVoidGuardsIT {
   }
 
   @Test
+  @DisplayName("VOID-16: a void made at a till names the drawer on OrderVoided; a bad id is a 400")
+  void aVoidNamesTheDrawer() {
+    String order = rig().sale(T, STORE, V_A, 1, null, MANAGER);
+    String other = rig().sale(T, STORE, V_A, 1, null, MANAGER);
+    String drawer = Ids.newId().toString();
+
+    Response bad =
+        rig()
+            .post(
+                "/orders/" + other + "/void",
+                "{\"reason\":\"mis-ring\",\"tillSessionId\":\"not-an-id\"}",
+                T,
+                "MANAGER",
+                MANAGER,
+                Ids.newId().toString());
+    assertThat(bad.getStatus(), is(400));
+    assertThat(statusOf(other), is("FULFILLED"));
+
+    data(
+        rig()
+            .post(
+                "/orders/" + order + "/void",
+                "{\"reason\":\"mis-ring\",\"tillSessionId\":\"" + drawer + "\"}",
+                T,
+                "MANAGER",
+                MANAGER,
+                Ids.newId().toString()),
+        200);
+
+    assertThat(rig().event(order, "OrderVoided").getString("tillSessionId"), is(drawer));
+  }
+
+  @Test
   @DisplayName(
       "VOID-10: a second void under a new key is refused; a retry under the same key is not")
   void aSecondVoidIsRefusedButARetryIsNot() {

@@ -22,6 +22,7 @@ import '../../shared/widgets/empty_state.dart';
 import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
 import 'pos_fiscal_receipt.dart';
+import 'cash_providers.dart';
 import 'pos_providers.dart';
 import 'pos_quote.dart';
 import 'pos_vat.dart';
@@ -1106,10 +1107,10 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
           ]);
         }
         try {
-          await dio.post(
-            '/${ApiConstants.payment}/payments',
-            data: {...sale.tenders[i].body, 'orderId': orderId},
-            options: Options(headers: {'Idempotency-Key': derivedId(idemBase, 'pay:$i')}),
+          await postTender(
+            dio,
+            {...sale.tenders[i].body, 'orderId': orderId},
+            idempotencyKey: derivedId(idemBase, 'pay:$i'),
           );
         } catch (e) {
           // This place's own approval, recorded on this order by somebody
@@ -1683,6 +1684,7 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
     final settlement = ref.read(posExchangeSettlementProvider);
     final List<PosLine> cart = settlement?.lines ?? ref.read(posCartProvider);
     final storeId = ref.read(posStoreProvider);
+    final tillSession = ref.read(saleTillProvider).value;
     final customer = settlement != null ? null : ref.read(posCustomerProvider);
     final walkInPhone = ref.read(posWalkInPhoneProvider);
     final discount = _discount;
@@ -1734,6 +1736,8 @@ class _TenderScreenState extends ConsumerState<TenderScreen> {
             'amount': t.amount,
             'method': t.paymentMethod,
             'storeId': storeId,
+            // The drawer this sale is rung on, so its report counts the money.
+            'tillSessionId': ?tillSession,
             if (t.method == 'GIFT_CARD') 'reference': t.giftCardCode,
             if (t.method == 'CARD' && t.reference != null) 'reference': t.reference,
             if (t.method == 'STORE_CREDIT') 'reference': 'STORE_CREDIT',

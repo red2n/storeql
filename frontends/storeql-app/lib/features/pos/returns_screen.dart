@@ -17,6 +17,7 @@ import '../admin/customer_providers.dart';
 import '../admin/providers/admin_providers.dart';
 import '../admin/recall_providers.dart';
 import '../admin/recall_return_choice.dart';
+import 'cash_providers.dart';
 import 'pos_providers.dart';
 import 'pos_recall_check.dart';
 
@@ -430,6 +431,8 @@ class _PosReturnsScreenState extends ConsumerState<PosReturnsScreen> {
       'refundMethod': _method,
       if (topUp) 'giftCardCode': giftCode,
       if (_recall != null) 'recallNoticeId': _recall!.id,
+      // The drawer the cash goes back out of, so its report counts it.
+      'tillSessionId': ?ref.read(saleTillProvider).value,
       'items': items,
     };
     final key = _keyForAttempt(

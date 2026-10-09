@@ -54,6 +54,7 @@ public class CashManagementService {
     UUID storeId = Ids.parse(req.storeId());
     ctx.requireStoreAccess(storeId);
     requireCash(tenantId, req.floatAmount(), CASH_AMOUNT_INVALID);
+    String basis = basisOf(req.basis());
     TillSession session =
         new TillSession(
             Ids.newId(),
@@ -65,8 +66,24 @@ public class CashManagementService {
             null,
             null,
             Instant.now(),
-            null);
+            null,
+            basis);
     return toSessionResponse(repo.openTill(session));
+  }
+
+  /**
+   * The basis a drawer opens on: SESSION, or WINDOW (the default, for a client that sends no
+   * session).
+   *
+   * @throws ApiException {@code TILL_BASIS_INVALID} (400) for anything else
+   */
+  private static String basisOf(String requested) {
+    if (requested == null || requested.isBlank()) return TillSession.BASIS_WINDOW;
+    String basis = requested.strip().toUpperCase(java.util.Locale.ROOT);
+    if (!TillSession.BASIS_WINDOW.equals(basis) && !TillSession.BASIS_SESSION.equals(basis)) {
+      throw ApiException.badRequest("TILL_BASIS_INVALID", "basis is SESSION or WINDOW");
+    }
+    return basis;
   }
 
   /**
@@ -234,17 +251,32 @@ public class CashManagementService {
   /**
    * The session's figures over {@code [openedAt, to)}: tenders and refunds at the session's own
    * store only (tenant, then store, then the window), the session's own drops and pay-ins and
-   * pay-outs, and the expectation from the one pure formula. Until registers exist the basis is the
-   * window at the store.
+   * pay-outs, and the expectation from the one pure formula. The money is the session's own on the
+   * SESSION basis and the store's in the window on the WINDOW basis (see {@link TillSession}).
    */
   private TillReportResponse buildReport(
       TillSession session, BigDecimal countedCash, Instant to, String note) {
     Instant from = session.openedAt();
+    boolean bySession = TillSession.BASIS_SESSION.equals(session.moneyBasis());
 
+    // The drawer's money: exactly what names this session (SESSION), or everything at the store
+    // while
+    // it was open (WINDOW). The first does not move because another till is open at the store.
     List<Object[]> salesRows =
-        repo.sumTendersByMethod(session.tenantId(), session.storeId(), from, to);
+        bySession
+            ? repo.sumTendersBySession(session.tenantId(), session.id())
+            : repo.sumTendersByMethod(session.tenantId(), session.storeId(), from, to);
     List<Object[]> refundRows =
-        repo.sumRefundsByMethod(session.tenantId(), session.storeId(), from, to);
+        bySession
+            ? repo.sumRefundsBySession(session.tenantId(), session.id())
+            : repo.sumRefundsByMethod(session.tenantId(), session.storeId(), from, to);
+    Map<String, TenderSummary> notAtTill = null;
+    if (bySession) {
+      notAtTill =
+          tenderSummary(
+              repo.sumTendersNotAtATill(session.tenantId(), session.storeId(), from, to),
+              repo.sumRefundsNotAtATill(session.tenantId(), session.storeId(), from, to));
+    }
 
     Map<String, BigDecimal> sales = new HashMap<>();
     for (Object[] row : salesRows) {
@@ -301,8 +333,28 @@ public class CashManagementService {
         cashRefunds,
         payIns,
         payOuts,
-        "WINDOW",
-        note);
+        session.moneyBasis(),
+        note,
+        notAtTill);
+  }
+
+  /** Sales, refunds and net per tender method from two sums. */
+  private static Map<String, TenderSummary> tenderSummary(
+      List<Object[]> salesRows, List<Object[]> refundRows) {
+    Map<String, BigDecimal> sales = new HashMap<>();
+    salesRows.forEach(r -> sales.put((String) r[0], (BigDecimal) r[1]));
+    Map<String, BigDecimal> refunds = new HashMap<>();
+    refundRows.forEach(r -> refunds.put((String) r[0], (BigDecimal) r[1]));
+    var methods = new java.util.TreeSet<String>();
+    methods.addAll(sales.keySet());
+    methods.addAll(refunds.keySet());
+    Map<String, TenderSummary> out = new java.util.LinkedHashMap<>();
+    for (String m : methods) {
+      BigDecimal sold = sales.getOrDefault(m, BigDecimal.ZERO);
+      BigDecimal back = refunds.getOrDefault(m, BigDecimal.ZERO);
+      out.put(m, new TenderSummary(sold, back, sold.subtract(back)));
+    }
+    return Map.copyOf(out);
   }
 
   /**
@@ -334,6 +386,7 @@ public class CashManagementService {
         s.countedCash(),
         s.overShort(),
         s.openedAt(),
-        s.closedAt());
+        s.closedAt(),
+        s.moneyBasis());
   }
 }

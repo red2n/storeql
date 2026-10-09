@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 
+import '../constants.dart';
 import '../network/api_error.dart';
 
 /// A POS sale captured at the till but not yet accepted by the server.
@@ -321,6 +322,46 @@ const _permanentConflicts = {
 bool cardApprovalAlreadyRecorded(Object error, Map<String, dynamic> body) =>
     body['terminalPaymentId'] != null &&
     apiErrorCode(error) == 'TERMINAL_ATTEMPT_ALREADY_RECORDED';
+
+/// What payment-svc answers a tender that names a till session it will not
+/// count the money in: not open any more, at another store, or not there.
+const _tillSessionRefusals = {
+  'TILL_SESSION_NOT_OPEN',
+  'TILL_SESSION_OTHER_STORE',
+  'TILL_SESSION_NOT_FOUND',
+};
+
+/// Whether [error] is payment-svc refusing the till session a tender [body]
+/// names (see [postTender]).
+bool tillSessionRefused(Object error, Map<String, dynamic> body) =>
+    body['tillSessionId'] != null &&
+    _tillSessionRefusals.contains(apiErrorCode(error));
+
+/// Records one tender (`POST /payments`) under [idempotencyKey].
+///
+/// A tender names the till session it was taken at so that drawer's report
+/// counts it. Where the session was ended while the sale was open, or waited in
+/// the offline queue past the day's close, the server refuses it — but the money
+/// has been taken and must be recorded, so the tender is sent again naming
+/// none: the report then shows it as "not at a till" for a manager to place.
+/// Same key, because the refusal wrote nothing.
+Future<void> postTender(
+  Dio dio,
+  Map<String, dynamic> data, {
+  required String idempotencyKey,
+}) async {
+  Future<void> send(Map<String, dynamic> body) => dio.post(
+        '/${ApiConstants.payment}/payments',
+        data: body,
+        options: Options(headers: {'Idempotency-Key': idempotencyKey}),
+      );
+  try {
+    await send(data);
+  } catch (e) {
+    if (!tillSessionRefused(e, data)) rethrow;
+    await send({...data}..remove('tillSessionId'));
+  }
+}
 
 /// Whether a server *response* to a replay is permanent — retrying will not help,
 /// so the sale is parked for a human instead of looping forever.

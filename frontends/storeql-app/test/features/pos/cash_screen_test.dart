@@ -30,9 +30,12 @@ class _FakeApiClient implements ApiClient {
 /// answer to "which till is open here": a session id, `null` for none (404
 /// TILL_SESSION_NOT_OPEN), or [_down] for a failure.
 class _Server implements HttpClientAdapter {
-  _Server({this.current});
+  _Server({this.current, this.notAtTill});
 
   String? current;
+
+  /// The `notAtTill` member the X report answers with, when a test wants one.
+  final Map<String, dynamic>? notAtTill;
   final List<RequestOptions> requests = [];
 
   static ResponseBody _json(Object body, int status) => ResponseBody.fromString(
@@ -94,6 +97,7 @@ class _Server implements HttpClientAdapter {
           'grossSales': 42.5,
           'totalRefunds': 0,
           'netSales': 42.5,
+          if (notAtTill != null) 'notAtTill': notAtTill,
         }
       }, 200);
     }
@@ -155,6 +159,28 @@ void main() {
         isNotEmpty);
   });
 
+  testWidgets(
+      'cash that names no drawer is shown apart, and is not in the expected cash',
+      (tester) async {
+    await _pump(
+        tester,
+        _Server(current: _openId, notAtTill: {
+          'CASH': {'sales': 7.0, 'refunds': 0, 'net': 7.0},
+        }));
+
+    expect(find.text('Cash not at a till (in no drawer)'), findsOneWidget);
+    expect(find.text('£7.00'), findsOneWidget);
+    expect(find.text('£142.50'), findsOneWidget,
+        reason: 'the drawer expects what it was told, not that cash too');
+  });
+
+  testWidgets('a drawer with nothing outside it shows no such line',
+      (tester) async {
+    await _pump(tester, _Server(current: _openId));
+
+    expect(find.text('Cash not at a till (in no drawer)'), findsNothing);
+  });
+
   testWidgets('no till open (404 TILL_SESSION_NOT_OPEN) offers Open till',
       (tester) async {
     await _pump(tester, _Server());
@@ -174,6 +200,8 @@ void main() {
 
     final open = server.requests.singleWhere((r) => r.method == 'POST');
     expect((open.data as Map)['storeId'], _storeId);
+    expect((open.data as Map)['basis'], 'SESSION',
+        reason: 'a drawer counts only what the sales rung on it name');
     expect(find.text('Till session'), findsOneWidget);
     expect(_openTillButton, findsNothing);
   });
