@@ -1556,6 +1556,47 @@ public class PricingRepository extends BaseOutboxRepository {
   }
 
   /**
+   * Appends tax lines on one transaction, each once: a row whose id is already there is left alone,
+   * so a redelivered event records nothing twice.
+   *
+   * @return how many rows were new
+   */
+  public int appendTaxTransactions(List<TaxTransaction> rows) {
+    if (rows.isEmpty()) return 0;
+    return inTx(
+        c -> {
+          int added = 0;
+          try (var ps =
+              c.prepareStatement(
+                  "INSERT INTO tax_transactions"
+                      + " (id,tenant_id,order_id,order_line_id,variant_id,store_id,"
+                      + "  vat_code,vat_rate,net_amount,vat_amount,gross_amount,"
+                      + "  exempt,tax_point_date,invoice_ref)"
+                      + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (id) DO NOTHING")) {
+            for (TaxTransaction tt : rows) {
+              ps.setObject(1, tt.id());
+              ps.setObject(2, tt.tenantId());
+              ps.setObject(3, tt.orderId());
+              ps.setObject(4, tt.orderLineId());
+              ps.setObject(5, tt.variantId());
+              ps.setObject(6, tt.storeId());
+              ps.setString(7, tt.vatCode());
+              ps.setBigDecimal(8, tt.vatRate());
+              ps.setBigDecimal(9, tt.netAmount());
+              ps.setBigDecimal(10, tt.vatAmount());
+              ps.setBigDecimal(11, tt.grossAmount());
+              ps.setBoolean(12, tt.exempt());
+              ps.setObject(13, toOdt(tt.taxPointDate()));
+              ps.setString(14, tt.invoiceRef());
+              added += ps.executeUpdate();
+            }
+          }
+          return added;
+        },
+        "append tax transactions");
+  }
+
+  /**
    * The tax lines recorded against one order, oldest first.
    *
    * @param tenantId owning tenant; the first condition of the query

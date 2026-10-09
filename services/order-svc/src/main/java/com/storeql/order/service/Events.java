@@ -460,6 +460,8 @@ public final class Events {
           .append(line.variantId())
           .append("\",\"qty\":")
           .append(line.qty().toPlainString());
+      // The line's own id (additive): pricing-svc keys the line's tax record by it.
+      if (line.id() != null) sb.append(",\"lineId\":\"").append(line.id()).append('"');
       if (line.unitPrice() != null) {
         sb.append(",\"unitPrice\":").append(line.unitPrice().toPlainString());
       }
@@ -681,9 +683,14 @@ public final class Events {
         tenantId,
         orderId,
         String.format(
-            "{\"eventId\":\"%s\",\"eventType\":\"OrderCancelled\",\"tenantId\":\"%s\","
-                + "\"orderId\":\"%s\",\"reason\":\"%s\"%s}",
-            Ids.newId(), tenantId, orderId, esc(reason), kind(channel, fulfilmentType)));
+            "{\"eventId\":\"%s\",\"eventType\":\"OrderCancelled\",\"occurredAt\":\"%s\","
+                + "\"tenantId\":\"%s\",\"orderId\":\"%s\",\"reason\":\"%s\"%s}",
+            Ids.newId(),
+            Instant.now(),
+            tenantId,
+            orderId,
+            esc(reason),
+            kind(channel, fulfilmentType)));
   }
 
   /**
@@ -938,6 +945,8 @@ public final class Events {
               .add("qty", item.qty());
       // A line from before conditions existed has none; the consumer reads its absence as sellable.
       if (item.condition() != null) line.add("condition", item.condition());
+      // What was refunded for the line, VAT included (additive): the VAT return reads it.
+      if (item.refundAmount() != null) line.add("amount", item.refundAmount());
       // At shelf prices the VAT inside what is refunded for the line (additive: older consumers
       // ignore it).
       if (item.taxAmount() != null) {
@@ -952,6 +961,7 @@ public final class Events {
         Json.createObjectBuilder()
             .add("eventId", Ids.newId().toString())
             .add("eventType", "OrderReturned")
+            .add("occurredAt", Instant.now().toString())
             .add("tenantId", tenantId.toString())
             .add("orderId", orderId.toString())
             .add("returnId", returnId.toString())
@@ -1061,6 +1071,7 @@ public final class Events {
         Json.createObjectBuilder()
             .add("eventId", Ids.newId().toString())
             .add("eventType", "OrderVoided")
+            .add("occurredAt", Instant.now().toString())
             .add("tenantId", tenantId.toString())
             .add("orderId", orderId.toString())
             .add("storeId", storeId.toString())

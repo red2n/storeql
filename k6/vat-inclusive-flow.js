@@ -115,10 +115,13 @@ export default function ({ tenant, rival, store, items, list, cashier }) {
   truthy('[+] sales are the rest', round(-net(posted, '4010')) === round(shelfTotal - vatTotal), net(posted, '4010'));
   truthy('[+] sales plus VAT output is exactly what was paid', round(-net(posted, '4010') - net(posted, '2200')) === shelfTotal, posted);
 
-  // ── a refund takes back no more than it was ─────────────────────────────────────────────────
-  expect(call('POST', `/api/payment-svc/payments/by-order/${sale.id}/refunds`, {
-    token: owner, idem: true, body: { paymentId: tender.id, amount: '1.29', method: 'CASH', reason: 'returned loaf' },
-  }), '[+] a loaf is refunded at its shelf price', [200, 201]);
+  // ── a return takes back exactly what was paid, in the ledger and in the VAT return ─────────────
+  const given = call('POST', `/api/order-svc/orders/${sale.id}/returns`, {
+    token: owner, idem: true,
+    body: { reason: 'returned loaf', items: [{ variantId: items[0].variantId, qty: 1, condition: 'SEALED' }] },
+  });
+  expect(given, '[+] a loaf is returned at its shelf price', [200, 201]);
+  truthy('[+] and 1.29 comes back, not a figure worked out again', num(data(given).refundAmount) === 1.29, data(given));
   let refund = [];
   truthy('[+] the refund reaches the ledger', poll(60, () => {
     refund = linesFor().filter((l) => l.sourceType === 'SALE_REFUND');
@@ -129,6 +132,20 @@ export default function ({ tenant, rival, store, items, list, cashier }) {
     token: owner, idem: true, body: { paymentId: tender.id, amount: '9.99', method: 'CASH', reason: 'too much' },
   }), '[-] more than was paid cannot be refunded', [400, 409, 422]);
   truthy('[+] the trial balance still balances', data(call('GET', `${LEDGER}/trial-balance`, { token: owner })).balanced === true);
+
+  // The VAT return reads the sale and the return as the ledger does: 0.31 less 0.22 of VAT on 5.46 less 1.07 net.
+  const from = new Date(Date.now() - 86400000).toISOString();
+  const to = new Date(Date.now() + 2 * 86400000).toISOString();
+  let vr = {};
+  truthy('[+] the VAT return shows the sale and the return', poll(60, () => {
+    vr = data(call('GET', `/api/pricing-svc/vat-return?from=${from}&to=${to}`, { token: owner }));
+    return num(vr.box1) === 0.09 && num(vr.box6) === 4.39;
+  }) >= 0, vr);
+  truthy('[+] box 1 is the ledger\u2019s VAT output, to the penny', round(-net(linesFor(), '2200')) === num(vr.box1), { box1: vr.box1, ledger: -net(linesFor(), '2200') });
+  truthy('[+] box 6 is the ledger\u2019s sales', round(-net(linesFor(), '4010')) === num(vr.box6), { box6: vr.box6, ledger: -net(linesFor(), '4010') });
+  expect(call('GET', `/api/pricing-svc/vat-return?from=${from}&to=${to}`, { token: cashier.token }), '[-] a cashier cannot read the VAT return', 403);
+  const theirs = data(call('GET', `/api/pricing-svc/vat-return?from=${from}&to=${to}`, { token: rival.owner.token }));
+  truthy('[-] another business\u2019s return has none of it', num(theirs.box1) === 0 && num(theirs.box6) === 0, theirs);
 
   // ── isolation ───────────────────────────────────────────────────────────────────────────────
   expect(call('GET', `/api/order-svc/orders/${sale.id}/receipt-document`, { token: rival.owner.token }), '[-] another business cannot read this receipt', 404);
